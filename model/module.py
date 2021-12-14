@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn.functional import linear
 
 from model.layer import ConvNet
 
@@ -9,15 +10,14 @@ class VAE(nn.Module):
         super().__init__()
         self.global_step = 0
 
-    def reparameterize(cls, mu, logvar):
+    @staticmethod
+    def reparameterize(mu, logvar):
         eps = torch.randn_like(logvar)
         std = torch.exp(0.5 * logvar)
         return mu + eps * std
 
-    def kl_scheduler(self):
-        return max((self.global_step // 10) % 10000 * 0.0001, 0.0001)
-
-    def kl_divergence(cls, mu, var):
+    @staticmethod
+    def kl_divergence(mu, var):
         return torch.mean(-0.5 * torch.sum(1 + var - mu.pow(2) - var.exp(), dim=2))
 
     def step(self):
@@ -33,15 +33,18 @@ class MotionEnc(VAE):
         else:
             raise NotImplementedError() # TODO other joint representation
         input_channel = args.joint_num * joint_repr_dim
+
+        conv_mode = 'downsample' if self.args.with_motion_downsample else 'same'
         self.TCN = ConvNet(
-            input_channel, [256, 256, 128, 128, 64], dropout=args.dropout,
+            input_channel, args.encoder_channels, args.encoder_downsample_layers, conv_mode, args.norm_type, dropout=args.dropout
         )
-        self.spec_linear = nn.Linear(64, 32)
+
+        self.spec_linear = nn.Linear(args.encoder_channels[-1], args.encoder_channels[-1])
         self.spec_mean = nn.Sequential(
-            nn.Linear(32, 32), nn.LeakyReLU(0.1), nn.Linear(32, args.pose_hidden_size),
+            nn.Linear(args.encoder_channels[-1], args.encoder_channels[-1]), nn.LeakyReLU(0.1), nn.Linear(args.encoder_channels[-1], args.pose_hidden_size),
         )
         self.spec_var = nn.Sequential(
-            nn.Linear(32, 32), nn.LeakyReLU(0.1), nn.Linear(32, args.pose_hidden_size),
+            nn.Linear(args.encoder_channels[-1], args.encoder_channels[-1]), nn.LeakyReLU(0.1), nn.Linear(args.encoder_channels[-1], args.pose_hidden_size),
         )
 
     def forward(self, inputs: torch.Tensor):
@@ -87,11 +90,12 @@ class MotionDec(nn.Module):
             raise NotImplementedError() # TODO other joint representation
         output_dim = joint_repr_dim * self.args.joint_num
 
+        conv_mode = 'upsample' if self.args.with_motion_downsample else 'same'
         self.TCN = ConvNet(
-            args.pose_hidden_size, [64, 128, 128, 256, 256], dropout=args.dropout,
+            args.pose_hidden_size, args.decoder_channels, args.decoder_upsample_layers, conv_mode, args.norm_type, dropout=args.dropout
         )
         self.pose_g = nn.Sequential(
-            nn.Linear(256, 256), nn.LeakyReLU(0.1), nn.Linear(256, output_dim),
+            nn.Linear(args.decoder_channels[-1], args.decoder_channels[-1]), nn.LeakyReLU(0.1), nn.Linear(args.decoder_channels[-1], output_dim),
         )
 
     def forward(self, spec_feature: torch.Tensor):

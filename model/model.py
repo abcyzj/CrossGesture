@@ -111,7 +111,8 @@ class MotionVAE:
         return recon_m
 
     def sample_motion(self):
-        z_motion = self.sampling([1, self.args.seq_len, self.args.pose_hidden_size]).to(self.device)
+        num_down_sample_layers = sum([1 if x else 0 for x in self.args.encoder_downsample_layers])
+        z_motion = self.sampling([1, self.args.seq_len // 2**num_down_sample_layers, self.args.pose_hidden_size]).to(self.device)
         recon_m = self.net_G['motion_dec'](z_motion)
         recon_m = self.motion_processor.decode_motion(recon_m)
         return recon_m
