@@ -34,9 +34,8 @@ class MotionEnc(VAE):
             raise NotImplementedError() # TODO other joint representation
         input_channel = args.joint_num * joint_repr_dim
 
-        conv_mode = 'downsample' if self.args.with_motion_downsample else 'same'
         self.TCN = ConvNet(
-            input_channel, args.encoder_channels, args.encoder_downsample_layers, conv_mode, args.norm_type, dropout=args.dropout
+            input_channel, args.encoder_channels, args.encoder_downsample_layers, 'downsample', args.norm_type, dropout=args.dropout
         )
 
         self.spec_linear = nn.Linear(args.encoder_channels[-1], args.encoder_channels[-1])
@@ -90,9 +89,8 @@ class MotionDec(nn.Module):
             raise NotImplementedError() # TODO other joint representation
         output_dim = joint_repr_dim * self.args.joint_num
 
-        conv_mode = 'upsample' if self.args.with_motion_downsample else 'same'
         self.TCN = ConvNet(
-            args.pose_hidden_size, args.decoder_channels, args.decoder_upsample_layers, conv_mode, args.norm_type, dropout=args.dropout
+            args.pose_hidden_size, args.decoder_channels, args.decoder_upsample_layers, 'upsample', args.norm_type, dropout=args.dropout
         )
         self.pose_g = nn.Sequential(
             nn.Linear(args.decoder_channels[-1], args.decoder_channels[-1]), nn.LeakyReLU(0.1), nn.Linear(args.decoder_channels[-1], output_dim),
