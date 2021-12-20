@@ -111,10 +111,22 @@ class MotionVAE:
         return recon_m
 
     def sample_motion(self):
-        num_down_sample_layers = sum([1 if x else 0 for x in self.args.encoder_downsample_layers])
-        z_motion = self.sampling([1, self.args.seq_len // 2**num_down_sample_layers, self.args.pose_hidden_size]).to(self.device)
-        recon_m = self.net_G['motion_dec'](z_motion)
-        recon_m = self.motion_processor.decode_motion(recon_m)
+        if self.args.vae_type == 'vae':
+            num_down_sample_layers = sum([1 if x else 0 for x in self.args.encoder_downsample_layers])
+            z_motion = self.sampling([1, self.args.seq_len // 2**num_down_sample_layers, self.args.pose_hidden_size]).to(self.device)
+            recon_m = self.net_G['motion_dec'](z_motion)
+            recon_m = self.motion_processor.decode_motion(recon_m)
+        elif self.args.vae_type == 'vqvae':
+            num_down_sample_layers = sum([1 if x else 0 for x in self.args.encoder_downsample_layers])
+            random_indexes = torch.randint(self.args.num_embedding, size=[self.args.seq_len // 2**num_down_sample_layers, self.args.num_vq_head, 1], device=self.device)
+            random_encodings = torch.zeros(random_indexes.shape[0], self.args.num_vq_head, self.args.num_embedding, device=self.device)
+            random_encodings.scatter_(2, random_indexes, 1)
+            z_motion = torch.einsum('bhn,hnc->bhc', random_encodings, self.net_G['motion_enc'].vae._embedding).unsqueeze(0)
+            z_motion = z_motion.reshape(z_motion.shape[0], z_motion.shape[1], -1)
+            recon_m = self.net_G['motion_dec'](z_motion)
+            recon_m = self.motion_processor.decode_motion(recon_m)
+        else:
+            raise NotImplementedError()
         return recon_m
 
     def train_one_batch(self, motions: torch.Tensor):
@@ -207,4 +219,4 @@ class MotionVAE:
         self.net_G.load_state_dict(checkpoint['net_G'])
         self.epoch = checkpoint['epoch']
         self.global_step = checkpoint['global_step']
-        self.net_G['motion_enc'].global_step = checkpoint['global_step']
+        self.net_G['motion_enc'].set_step(checkpoint['global_step'])
