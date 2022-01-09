@@ -1,16 +1,22 @@
 import argparse
+import math
 import os
 import pickle
+import shlex
+from subprocess import Popen
 
 import lmdb
 import numpy as np
+import soundfile as sf
 import torch
-from sklearn.preprocessing import normalize
+from sklearn.preprocessing import normalize, scale, StandardScaler
+from tqdm import tqdm
 
 from common.data_utils import (convert_dir_vec_to_pose,
                                convert_pose_seq_to_dir_vec)
 from common.mocap_dataset import MocapDataset
 from common.skeleton import Skeleton
+from helpers import spec_chunking
 from vis import render_animation
 
 BAIJIA_SKELETON = Skeleton(
@@ -35,6 +41,7 @@ class BaijiaDataset(MocapDataset):
         self.seq_len = args.seq_len
         self.seq_stride = args.seq_stride
         self.is_train = is_train
+        self.num_downsample_layer = sum([1 if x else 0 for x in args.encoder_downsample_layers])
         self.db_env = None
         self.db_txn = None
 
@@ -57,18 +64,31 @@ class BaijiaDataset(MocapDataset):
             cur_key = self.expanded_train_keys[index]
         else:
             cur_key = self.expanded_test_keys[index]
-        keypoints_3d = self.pose_seq_list[self.key2pose_index[cur_key]]
+        cur_index = self.key2pose_index[cur_key]
+        keypoints_3d = self.pose_seq_list[cur_index]
         cur_len = keypoints_3d.shape[0]
+        ori_sr = self.audio_sr_list[cur_index]
+        ori_sample_per_frame = ori_sr / self.fps()
+        spec_sample_per_frame = 16000 / 160 / self.fps()
         if self.is_train:
             start_frame = int((cur_len - self.seq_len) * torch.rand([]).item())
         else: # For test, clip sampling must not be random
             in_key_index = index - self.key2expanded_start_index[cur_key]
             start_frame = in_key_index * self.seq_stride
         end_frame = start_frame + self.seq_len
-        return self.keypoints_to_normalized_dir_vec(keypoints_3d[start_frame:end_frame])
+
+        keypoints = self.keypoints_to_normalized_dir_vec(keypoints_3d[start_frame:end_frame])
+        ori_audio = self.wav_seq_list[cur_index][int(start_frame*ori_sample_per_frame):int(end_frame*ori_sample_per_frame)]
+        norm_spec = self.spec_list[cur_index][:, int(start_frame*spec_sample_per_frame):int(end_frame*spec_sample_per_frame)]
+        return  {
+            'keypoints': keypoints,
+            'ori_audio': ori_audio,
+            'norm_spec': spec_chunking(norm_spec, frame_rate=self.fps(), chunk_size=21, stride=2**self.num_downsample_layer),
+            'ori_sr': ori_sr
+        }
 
     def _init_lmdb(self):
-        self.db_env = lmdb.open(os.path.join(self.base_path, 'baijia_upper'), map_size=20*1024**3, readonly=True, lock=False, max_dbs=64)
+        self.db_env = lmdb.open(os.path.join(self.base_path, 'baijia_audio'), map_size=20*1024**3, readonly=True, lock=False, max_dbs=64)
         self.db_txn = self.db_env.begin(write=False)
         db_keys = list(self.db_txn.cursor().iternext(values=False))
         rng = np.random.RandomState(8848)
@@ -82,9 +102,13 @@ class BaijiaDataset(MocapDataset):
         self.key2pose_index = {}
         self.key2expanded_start_index = {}
         self.pose_seq_list = []
-        for key in self.all_keys:
+        self.wav_seq_list = []
+        self.spec_list = []
+        self.audio_sr_list = []
+        for key in tqdm(self.all_keys, 'Load Baijia dataset'):
             val = pickle.loads(self.db_txn.get(key))
-            cur_len = val['keypoints_3d'].shape[0]
+            wav, spec, sr = val['audio_wav'], val['spec'], val['audio_sr']
+            cur_len = min(val['keypoints_3d'].shape[0], math.floor(wav.shape[0] / sr * self.fps()))
             expand_num = (cur_len - self.seq_len) // self.seq_stride + 1 if cur_len >= self.seq_len else 0
             self.expanded_keys.extend([key] * expand_num)
             self.key2pose_index[key] = len(self.pose_seq_list)
@@ -93,8 +117,14 @@ class BaijiaDataset(MocapDataset):
                 self.expanded_train_keys.extend([key] * expand_num)
             else:
                 self.expanded_test_keys.extend([key] * expand_num)
-            self.pose_seq_list.append(val['keypoints_3d'])
-        self.pose_seq_list = self.pose_seq_list
+            self.pose_seq_list.append(val['keypoints_3d'][:cur_len].copy())
+            self.wav_seq_list.append(wav[:cur_len*sr].copy())
+            scaler = StandardScaler()
+            spec = scaler.fit_transform(np.transpose(spec, (1, 0)))
+            spec = np.transpose(spec, (1, 0))
+            self.spec_list.append(spec.copy())
+            self.audio_sr_list.append(sr)
+
         all_pose_frames = np.vstack(self.pose_seq_list)
         bone_lengths = []
         for j, parent_j in enumerate(self._skeleton.parents()):
@@ -122,15 +152,19 @@ class BaijiaDataset(MocapDataset):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seq_len', type=int, default=100)
-    parser.add_argument('--clip_stride', default=10)
-    parser.add_argument('--base_path', default='data/')
-    parser.add_argument('--is_train', type=bool, default=False)
+    parser.add_argument('--seq_stride', default=10)
+    parser.add_argument('--data_path', default='data/')
     args = parser.parse_args()
-    dataset = BaijiaDataset(args)
-    pose = dataset[10]
-    dir_vec = dataset.keypoints_to_normalized_dir_vec(pose)
-    recon_pose = dataset.normalized_dir_vec_to_keypoints(dir_vec)
-    pose = dataset.camera_to_world(pose)
+    dataset = BaijiaDataset(args, is_train=False)
+    items = dataset[100]
+    pose = items['keypoints']
+    recon_pose = dataset.normalized_dir_vec_to_keypoints(pose)
     recon_pose = dataset.camera_to_world(recon_pose)
-    poses = {'Main': pose, 'Recon': recon_pose}
-    render_animation(poses, dataset.skeleton(), dataset.fps(), 3000, dataset.camera()['azimuth'], 'test4.mp4')
+    poses = {'Recon': recon_pose}
+    render_animation(poses, dataset.skeleton(), dataset.fps(), 3000, dataset.camera()['azimuth'], 'test_tmp.mp4')
+    audio = items['ori_audio']
+    sf.write('test_tmp.wav', audio, items['ori_sr'])
+    p = Popen(
+        shlex.split(f'ffmpeg -y -i test_tmp.mp4 -i test_tmp.wav -map 0 -map 1:a -c:v copy -shortest test.mp4'),
+    )
+    p.wait()

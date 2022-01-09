@@ -1,9 +1,8 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.layer import ConvNet
+from .layer import CausalConvolution, ConvNet
 
 
 class VanillaVAE(nn.Module):
@@ -89,7 +88,20 @@ class VectorQuantizerEMA(nn.Module):
         avg_probs = torch.mean(encodings, dim=(0, 1))
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
-        return loss, quantized, perplexity, encodings
+        B, T, *_ = input_shape
+        encoding_indices = encodings.reshape(B, T, self._num_head, self._num_embeddings)
+
+        return loss, quantized, perplexity, encoding_indices
+
+    def lookup_codebook(self, z_motion_one_hot: torch.Tensor):
+        """
+        :param z_motion_one_hot: (B, T, num_head, num_embedding)
+        return: (B, T, num_head, embedding_dim)
+        """
+        B, T, *_ = z_motion_one_hot.shape
+        z_motion_one_hot = z_motion_one_hot.view(-1, self._num_head, self._num_embeddings)
+        embeddings = torch.einsum('bhn,hnc->bhc', z_motion_one_hot, self._embedding)
+        return embeddings.reshape(B, T, self._num_head, self._embedding_dim)
 
 
 class MotionEnc(nn.Module):
@@ -139,16 +151,15 @@ class MotionEnc(nn.Module):
             self.z_spec_mu = self.spec_mean(spec_output)
             self.z_spec_var = self.spec_var(spec_output)
             z_specific = self.vae.reparameterize(self.z_spec_mu, self.z_spec_var)
+            return z_specific
         elif self.args.vae_type == 'vqvae':
             spec_output = self.spec_mlp(output)
-            commit_loss, quantized, perplexity, _ = self.vae(spec_output)
+            commit_loss, quantized, perplexity, encoding_indices = self.vae(spec_output)
             self.commit_loss = commit_loss
             self.perplexity = perplexity.detach() # Only for tensorboard display, do not backward gradient
-            z_specific = quantized
+            return quantized, encoding_indices
         else:
             raise NotImplementedError()
-
-        return z_specific
 
     def get_loss_dict(self):
         loss_dict = {}
@@ -204,3 +215,139 @@ class MotionDec(nn.Module):
             return output
         else:
             raise NotImplementedError()
+
+
+class MelSpecEnc(nn.Module):
+    def __init__(self, args):
+        """
+        :param latent_dim: size of the latent audio embedding
+        :param model_name: name of the model, used to load and save the model
+        """
+        super().__init__()
+
+        self.convert_dimensions = nn.Conv1d(80, 128, kernel_size=1)
+        self.weights_init(self.convert_dimensions)
+        self.receptive_field = 1
+
+        convs = []
+        norms = []
+        conv_len = 3
+        for i in range(4):
+            dilation = 2**(i % 3)
+            self.receptive_field += (conv_len - 1) * dilation
+            convs.append(nn.Conv1d(128, 128, kernel_size=conv_len, dilation=dilation))
+            norms.append(nn.BatchNorm1d(128))
+            self.weights_init(convs[-1])
+        self.convs = nn.ModuleList(convs)
+        self.norms = nn.ModuleList(norms)
+        self.code = nn.Linear(128, args.audio_latent_dim)
+
+        self.apply(lambda x: self.weights_init(x))
+
+    def weights_init(self, m):
+        if isinstance(m, nn.Conv1d):
+            nn.init.xavier_uniform_(m.weight)
+            try:
+                nn.init.constant_(m.bias, .01)
+            except:
+                pass
+
+    def forward(self, spec: torch.Tensor):
+        """
+        :param spec: (B, T, n_mel, chunk_size)
+        :return: code: B x T x latent_dim Tensor containing a latent audio code/embedding
+        """
+        B, T = spec.shape[0], spec.shape[1]
+
+        # Convert to the right dimensionality
+        x = spec.view(-1, spec.shape[2], spec.shape[3])
+        x = self.convert_dimensions(x)
+
+        # Process stacks
+        for conv, norm in zip(self.convs, self.norms):
+            x_ = F.leaky_relu(norm(conv(x)), .2)
+            x_ = F.dropout(x_, .2)
+            l = (x.shape[2] - x_.shape[2]) // 2
+            x = (x[:, :, l:-l] + x_) / 2
+
+        x = torch.mean(x, dim=-1)
+        x = x.view(B, T, x.shape[-1])
+        x = self.code(x)
+
+        return x
+
+
+class PriorDec(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+
+        num_head = args.num_vq_head
+        num_embedding = args.num_embedding
+        hidden = args.prior_hidden_dim
+        audio_dim = args.audio_latent_dim
+
+        self.embedding = nn.Conv1d(num_head*num_embedding, hidden, kernel_size=1)
+        self.conv_layers = nn.ModuleList([
+            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=1),
+            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=2),
+            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=4),
+            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=8)
+        ])
+        self.norm_layers = nn.ModuleList([nn.BatchNorm1d(hidden) for _ in range(len(self.conv_layers))])
+        self.logits = nn.Conv1d(hidden, num_head*num_embedding, kernel_size=1)
+
+        self.num_head = num_head
+        self.num_embedding = num_embedding
+        self.hidden = hidden
+        self.audio_dim = audio_dim
+
+        self.reset()
+    
+    def reset(self):
+        for conv in self.conv_layers:
+            conv.reset()
+
+    def receptive_field(self):
+        recep = 1
+        for layer in self.conv_layers:
+            recep += layer.receptive_field() - 1
+        return recep
+
+    def forward(self, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
+        """
+        :param motion_one_hot: (B, num_head, num_embedding, T)
+        :param audio_code: (B, audio_latent_dim, T)
+        :return logits: (B, num_head, num_embedding, T)
+        """
+
+        B, _, _, T = motion_one_hot.shape
+
+        x = self.embedding(motion_one_hot.view(B, -1, T).contiguous())
+
+        for conv, norm in zip(self.conv_layers, self.norm_layers):
+            x = conv(x, audio_code)
+            x = norm(x)
+            x = F.leaky_relu(x, 0.2)
+
+        logits = self.logits(x)
+        logits = logits.reshape(B, self.num_head, self.num_embedding, T)
+        return logits
+
+    def forward_inference(self, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
+        """
+        :param motion_one_hot: (1, num_head, num_embedding, T)
+        :param audio_code: (1, audio_latent_dim, T + 1)
+        :return logits: (1, num_head, num_embedding, T + 1)
+        """
+        _, num_head, num_embedding, T = motion_one_hot.shape
+        motion_one_hot = torch.cat([motion_one_hot, torch.zeros(1, num_head, num_embedding, 1, device=motion_one_hot.device)], dim=-1)
+
+        x = self.embedding(motion_one_hot.view(1, -1, T + 1))
+        for conv, norm in zip(self.conv_layers, self.norm_layers):
+            x = conv(x, audio_code)
+            x = norm(x)
+            x = F.leaky_relu(x, 0.2)
+
+        logits = self.logits(x)
+        logits = logits.reshape(1, self.num_head, self.num_embedding, T + 1)
+        return logits

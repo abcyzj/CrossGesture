@@ -18,7 +18,7 @@ def inference(model, dataset, args):
 
     for i in range(n_repeat):
         sample_index = rng.randint(0, n_sample)
-        motions = torch.Tensor(dataset[sample_index]).unsqueeze(0)
+        motions = torch.Tensor(dataset[sample_index]['keypoints']).unsqueeze(0)
         with torch.no_grad():
             recon_m = model.recon_motion(motions).cpu().numpy().squeeze()
             sample_m = model.sample_motion().cpu().numpy().squeeze()
@@ -42,6 +42,6 @@ if __name__ == '__main__':
         raise NotImplementedError()
 
     motion_vae = MotionVAE(args, is_train=False)
-    motion_vae.resume(args.resume)
+    motion_vae.resume(args.resume_vae)
     motion_vae.net_G.eval()
     inference(motion_vae, dataset, args)

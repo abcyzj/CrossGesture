@@ -8,7 +8,52 @@ from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from model.module import MotionDec, MotionEnc
+from .module import MotionDec, MotionEnc
+
+
+class Model:
+    def __init__(self, args, is_train):
+        super().__init__()
+        self.args = args
+        self.is_train = is_train
+
+        self.device = torch.device(args.device)
+        log_dir = os.path.join(args.run_dir, 'log')
+        self.logger = SummaryWriter(log_dir)
+
+        if is_train:
+            self.global_step = 0
+            self.epoch = 0
+
+    def log(self, batch, loss_dict):
+        for key in loss_dict:
+            self.logger.add_scalar(key, loss_dict[key].item(), self.global_step)
+        if batch % self.args.log_freq == 0:
+            logging.info(
+                f'Name: {self.args.name}, Epoch: {self.epoch}, Batch: {batch}/{self.batch_counts_per_epoch}'
+            )
+            for key in loss_dict:
+                logging.info(f'{key}: {loss_dict[key].item()}')
+
+    def init_optim(self, param):
+        if self.args.optim == 'Adam':
+            logging.info('Using Adam optimizer')
+            logging.info(f'lr: {self.args.lr}')
+            return torch.optim.Adam(param, lr=self.args.lr)
+        elif self.args.optim == 'AdamW':
+            logging.info('Using AdamW optimizer')
+            logging.info(f'lr: {self.args.lr}')
+            return torch.optim.AdamW(param, lr=self.args.lr)
+        elif self.args.optim == 'RMSProp':
+            logging.info('Using RMSProp optimizer')
+            logging.info(f'lr: {self.args.lr}')
+            return torch.optim.RMSprop(param, lr=self.args.lr)
+        elif self.args.optim == 'SGD':
+            logging.info('Using SGD optimizer')
+            logging.info(f'lr: {self.args.lr}, momentum: {self.args.momentum}')
+            return torch.optim.SGD(param, lr=self.args.lr, momentum=self.args.momentum,)
+        else:
+            raise NotImplementedError()
 
 
 def init(module):
@@ -54,21 +99,16 @@ class BaijiaMotionProcessor(MotionProcessor):
         return motion
 
 
-class MotionVAE:
+class MotionVAE(Model):
     def __init__(self, args, is_train):
-        super().__init__()
-        self.args = args
-        self.is_train = is_train
+        super().__init__(args, is_train)
 
         if args.dataset == 'Baijia':
             self.motion_processor = BaijiaMotionProcessor()
         else:
             raise NotImplementedError()
 
-        self.device = torch.device(args.device)
-        log_dir = os.path.join(args.run_dir, 'log')
-        self.logger = SummaryWriter(log_dir)
-        self.net_G = torch.nn.ModuleDict(
+        self.net_G = nn.ModuleDict(
             {
                 'motion_enc': MotionEnc(args),
                 'motion_dec': MotionDec(args)
@@ -78,18 +118,6 @@ class MotionVAE:
 
         if is_train:
             self.optimG = self.init_optim(self.net_G.parameters())
-            self.global_step = 0
-            self.epoch = 0
-
-    def log(self, batch, loss_dict):
-        for key in loss_dict:
-            self.logger.add_scalar(key, loss_dict[key].item(), self.global_step)
-        if batch % self.args.log_freq == 0:
-            logging.info(
-                f'Name: {self.args.name}, Epoch: {self.epoch}, Batch: {batch}/{self.batch_counts_per_epoch}'
-            )
-            for key in loss_dict:
-                logging.info(f'{key}: {loss_dict[key].item()}')
 
     def sampling(self, size=None, mean=None, var=None):
         if mean is not None and var is not None:
@@ -99,12 +127,32 @@ class MotionVAE:
             z_x = torch.randn(size, device=self.device)
         return z_x
 
+    def encode_motion(self, motions: torch.Tensor):
+        if self.net_G.training:
+            self.net_G.eval()
+        motions = motions.to(self.device)
+        motions = self.motion_processor.encode_motion(motions)
+        z_motion, z_motion_one_hot = self.net_G['motion_enc'](motions)
+        return z_motion, z_motion_one_hot
+
+    def decode_motion_one_hot(self, z_motion_one_hot: torch.Tensor):
+        """
+        :param z_motion_one_hot: (B, T, num_head, num_embedding)
+        """
+        if self.net_G.training:
+            self.net_G.eval()
+        B, T, *_ = z_motion_one_hot.shape
+        z_motion = self.net_G['motion_enc'].vae.lookup_codebook(z_motion_one_hot).reshape(B, T, -1)
+        dec_m = self.net_G['motion_dec'](z_motion)
+        dec_m = self.motion_processor.decode_motion(dec_m)
+        return dec_m
+
     def recon_motion(self, motions: torch.Tensor):
         motions = motions.to(self.device)
 
         motions = self.motion_processor.encode_motion(motions)
 
-        z_motion = self.net_G['motion_enc'](motions)
+        z_motion, _ = self.net_G['motion_enc'](motions)
         recon_m = self.net_G['motion_dec'](z_motion)
 
         recon_m = self.motion_processor.decode_motion(recon_m)
@@ -130,9 +178,9 @@ class MotionVAE:
         return recon_m
 
     def train_one_batch(self, motions: torch.Tensor):
-        self.z_motion_specific = self.net_G['motion_enc'](motions)
+        z_motion_specific, _ = self.net_G['motion_enc'](motions)
 
-        recon_m = self.net_G['motion_dec'](self.z_motion_specific)
+        recon_m = self.net_G['motion_dec'](z_motion_specific)
 
         return recon_m
 
@@ -159,7 +207,7 @@ class MotionVAE:
 
         while self.epoch < self.args.epochs:
             for batch, data in enumerate(tqdm(dataloader, f'Epoch {self.epoch}')):
-                motion = data.float().to(self.device)
+                motion = data['keypoints'].float().to(self.device)
 
                 self.optimG.zero_grad()
 
@@ -183,26 +231,6 @@ class MotionVAE:
             self.epoch += 1
             if self.epoch % self.args.save_freq == 0:
                 self.save(loss_G.item())
-
-    def init_optim(self, param):
-        if self.args.optim == 'Adam':
-            logging.info('Using Adam optimizer')
-            logging.info(f'lr: {self.args.lr}')
-            return torch.optim.Adam(param, lr=self.args.lr)
-        elif self.args.optim == 'AdamW':
-            logging.info('Using AdamW optimizer')
-            logging.info(f'lr: {self.args.lr}')
-            return torch.optim.AdamW(param, lr=self.args.lr)
-        elif self.args.optim == 'RMSProp':
-            logging.info('Using RMSProp optimizer')
-            logging.info(f'lr: {self.args.lr}')
-            return torch.optim.RMSprop(param, lr=self.args.lr)
-        elif self.args.optim == 'SGD':
-            logging.info('Using SGD optimizer')
-            logging.info(f'lr: {self.args.lr}, momentum: {self.args.momentum}')
-            return torch.optim.SGD(param, lr=self.args.lr, momentum=self.args.momentum,)
-        else:
-            raise NotImplementedError()
 
     def save(self, loss):
         state = {'args': self.args}

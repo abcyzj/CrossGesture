@@ -1,6 +1,9 @@
 import pickle
 
+import librosa
 import lmdb
+import torch
+import torchaudio as ta
 
 from common.skeleton import Skeleton
 
@@ -21,7 +24,7 @@ UPPER_SKELETON = Skeleton(
 )
 
 src_db_env = lmdb.open('data/baijia', readonly=True, map_size=20*1024**3)
-tgt_db_dnv = lmdb.open('data/baijia_upper', map_size=20*1024**3)
+tgt_db_dnv = lmdb.open('data/baijia_audio', map_size=20*1024**3)
 
 
 with src_db_env.begin() as src_txn:
@@ -33,5 +36,21 @@ with src_db_env.begin() as src_txn:
             tgt_val = src_val
             tgt_val.pop('keypoints')
             tgt_val['keypoints_3d'] = upper_keypoints
+            sr = src_val['audio_sr']
+            waveform = src_val['audio_wav']
+            audio_start_frame, audio_end_frame = src_val['audio_timestamp']
+            keypoint_start_frame, keypoint_end_frame = src_val['keypoint_timestamp']
+            sample_per_frame = sr // 25
+            waveform = waveform[(keypoint_start_frame-audio_start_frame)*sample_per_frame:(keypoint_end_frame-audio_start_frame)*sample_per_frame].copy()
+            tgt_val['audio_wav'] = waveform
+            tgt_val.pop('audio_timestamp')
+            norm_wave = torch.from_numpy(waveform.copy()).transpose(0, 1).to(torch.float32)
+            if sr != 16000:
+                norm_wave = ta.transforms.Resample(sr, 16000)(norm_wave)
+            if norm_wave.shape[0] > 1:
+                norm_wave = torch.mean(norm_wave, dim=0)
+            spec = librosa.feature.melspectrogram(y=norm_wave.numpy(), sr=16000, n_fft=2048, win_length=800, hop_length=160, n_mels=80)
+            spec_db = librosa.power_to_db(spec)
+            tgt_val['spec'] = spec
             tgt_txn.put(key, pickle.dumps(tgt_val))
             print(key.decode())

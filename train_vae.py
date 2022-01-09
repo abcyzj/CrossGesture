@@ -23,6 +23,6 @@ if __name__ == '__main__':
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     print(f'Batch per epoch: {len(dataloader)}')
     motion_vae = MotionVAE(args, is_train=True)
-    if args.resume:
-        motion_vae.resume(args.resume)
+    if args.resume_vae:
+        motion_vae.resume(args.resume_vae)
     motion_vae.train(dataloader)
