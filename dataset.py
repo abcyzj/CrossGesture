@@ -9,7 +9,7 @@ import lmdb
 import numpy as np
 import soundfile as sf
 import torch
-from sklearn.preprocessing import normalize, scale, StandardScaler
+from sklearn.preprocessing import normalize, StandardScaler
 from tqdm import tqdm
 
 from common.data_utils import (convert_dir_vec_to_pose,

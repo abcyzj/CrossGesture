@@ -87,7 +87,6 @@ class ContextPrior(Model):
         self.net.eval()
         ori_device = spec.device
         spec = spec.to(self.device)
-        self.net['prior_dec'].reset()
         audio_code = self.net['spec_enc'](spec)
         audio_code = audio_code.permute(0, 2, 1).contiguous() # (B, T, audio_dim) -> (B, audio_dim, T)
         latent_T = audio_code.shape[-1]

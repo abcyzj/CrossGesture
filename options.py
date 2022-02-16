@@ -16,8 +16,10 @@ def get_parser():
     parser.add_argument('--norm_type', type=str, required=True)
     parser.add_argument('--encoder_channels', nargs='+', type=int, default=[32, 32, 64, 128, 128])
     parser.add_argument('--encoder_downsample_layers', nargs='+', type=int, default=[1, 0, 1, 0, 1])
+    parser.add_argument('--enc_dilations', nargs='+', type=int, default=[1, 2, 4, 8, 16])
     parser.add_argument('--decoder_channels', nargs='+', type=int, default=[128, 64, 64, 32, 32])
     parser.add_argument('--decoder_upsample_layers', nargs='+', type=int, default=[1, 0, 1, 0, 1])
+    parser.add_argument('--dec_dilations', nargs='+', type=int, default=[1, 2, 4, 8, 16])
     parser.add_argument('--seq_len', type=int, required=True)
     parser.add_argument('--seq_stride', type=int, required=True)
     parser.add_argument('--batch_size', type=int, required=True)
@@ -40,5 +42,6 @@ def get_parser():
     parser.add_argument('--result_dir', type=str)
     parser.add_argument('--audio_latent_dim', type=int, default=128)
     parser.add_argument('--prior_hidden_dim', type=int, default=128)
+    parser.add_argument('--num_prior_dec_layer', type=int)
 
     return parser

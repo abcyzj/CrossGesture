@@ -115,7 +115,7 @@ class MotionEnc(nn.Module):
         input_channel = args.joint_num * joint_repr_dim
 
         self.TCN = ConvNet(
-            input_channel, args.encoder_channels, args.encoder_downsample_layers, 'downsample', args.norm_type, dropout=args.dropout
+            input_channel, args.encoder_channels, args.encoder_downsample_layers, 'downsample', args.norm_type, args.enc_dilations, dropout=args.dropout
         )
 
         if args.vae_type == 'vae':
@@ -197,7 +197,7 @@ class MotionDec(nn.Module):
         output_dim = joint_repr_dim * self.args.joint_num
 
         self.TCN = ConvNet(
-            args.num_vq_head * args.pose_hidden_size, args.decoder_channels, args.decoder_upsample_layers, 'upsample', args.norm_type, dropout=args.dropout
+            args.num_vq_head * args.pose_hidden_size, args.decoder_channels, args.decoder_upsample_layers, 'upsample', args.norm_type, args.dec_dilations, dropout=args.dropout
         )
         self.pose_g = nn.Sequential(
             nn.Linear(args.decoder_channels[-1], args.decoder_channels[-1]), nn.LeakyReLU(0.1), nn.Linear(args.decoder_channels[-1], output_dim),
@@ -288,24 +288,15 @@ class PriorDec(nn.Module):
 
         self.embedding = nn.Conv1d(num_head*num_embedding, hidden, kernel_size=1)
         self.conv_layers = nn.ModuleList([
-            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=1),
-            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=2),
-            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=4),
-            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=2, dilation=8)
+            CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=3, dilation=1) for _ in range(args.num_prior_dec_layer)
         ])
-        self.norm_layers = nn.ModuleList([nn.BatchNorm1d(hidden) for _ in range(len(self.conv_layers))])
+        self.norm_layers = nn.ModuleList([nn.InstanceNorm1d(hidden) for _ in range(len(self.conv_layers))])
         self.logits = nn.Conv1d(hidden, num_head*num_embedding, kernel_size=1)
 
         self.num_head = num_head
         self.num_embedding = num_embedding
         self.hidden = hidden
         self.audio_dim = audio_dim
-
-        self.reset()
-    
-    def reset(self):
-        for conv in self.conv_layers:
-            conv.reset()
 
     def receptive_field(self):
         recep = 1

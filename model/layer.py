@@ -70,7 +70,10 @@ class ResidualBlock(nn.Module):
             if conv_mode == 'same':
                 self.downsample = nn.Conv1d(n_inputs, n_outputs, 1)
             elif conv_mode == 'downsample':
-                self.downsample = nn.Conv1d(n_inputs, n_outputs, 1, stride=2)
+                self.downsample = nn.Sequential(
+                    nn.AvgPool1d(2),
+                    nn.Conv1d(n_inputs, n_outputs, 1)
+                )
             else:
                 self.downsample = nn.Sequential(
                     nn.Upsample(scale_factor=2, mode='linear'),
@@ -85,13 +88,13 @@ class ResidualBlock(nn.Module):
 
 
 class ConvNet(nn.Module):
-    def __init__(self, num_inputs, num_channels, resample_layers, conv_mode, norm_type, kernel_size=3, dropout=0.2):
+    def __init__(self, num_inputs, num_channels, resample_layers, conv_mode, norm_type, dilations, kernel_size=3, dropout=0.2):
         super().__init__()
         assert conv_mode in ['upsample', 'downsample']
         layers = []
         num_levels = len(num_channels)
         for i in range(num_levels):
-            dilation_size = 2 ** i
+            dilation_size = dilations[i]
             in_channels = num_inputs if i == 0 else num_channels[i - 1]
             out_channels = num_channels[i]
             layers.append(
@@ -157,7 +160,6 @@ class CausalConvolution(nn.Module):
         """
         self.inf_buffer = self.inf_buffer.to(context.device)
         self.inf_buffer = torch.cat([self.inf_buffer, torch.zeros(1, self.inf_buffer.shape[1], 1, device=self.inf_buffer.device)], dim=2)
-
 
         h = context[:, :, -self.receptive_field()-1:-1]
         if h.shape[-1] < self.receptive_field():
