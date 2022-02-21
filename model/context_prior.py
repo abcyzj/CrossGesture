@@ -28,12 +28,13 @@ class ContextPrior(Model):
 
     def train_one_batch(self, motions: torch.Tensor, norm_spec: torch.Tensor):
         with torch.no_grad():
-            _, z_motion_one_hot = self.motion_vae.encode_motion(motions)
+            z_motion, z_motion_one_hot = self.motion_vae.encode_motion(motions)
 
+        z_motion = z_motion.permute(0, 2, 3, 1) # (B, T, num_head, embedding_dim) -> (B, num_head, embedding_dim, T)
         z_motion_one_hot = z_motion_one_hot.permute(0, 2, 3, 1).contiguous() # (B, T, num_head, num_embedding) -> (B, num_head, num_embedding, T)
         audio_code = self.net['spec_enc'](norm_spec)
         audio_code = audio_code.permute(0, 2, 1).contiguous() # (B, T, audio_dim) -> (B, audio_dim, T)
-        prior_logits = self.net['prior_dec'](z_motion_one_hot, audio_code)
+        prior_logits = self.net['prior_dec'](z_motion, z_motion_one_hot, audio_code)
 
         z_motion_one_hot = z_motion_one_hot.permute(0, 2, 1, 3).contiguous() # (B, num_head, num_embedding, T) -> (B, num_embedding, num_head, T)
         prior_logits = prior_logits.permute(0, 2, 1, 3).contiguous()
@@ -93,13 +94,16 @@ class ContextPrior(Model):
 
         z_motion_one_hot = torch.zeros(1, self.args.num_vq_head, self.args.num_embedding, 0, device=self.device)
         for t in range(latent_T):
-            logits = self.net['prior_dec'].forward_inference(z_motion_one_hot, audio_code[:, :, :t+1])
+            z_motion = self.motion_vae.lookup_codebook(z_motion_one_hot.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+            logits = self.net['prior_dec'].forward_inference(z_motion, z_motion_one_hot, audio_code[:, :, :t+1])
             z_motion_one_hot = torch.cat([z_motion_one_hot, torch.zeros(1, self.args.num_vq_head, self.args.num_embedding, 1, device=self.device)], dim=-1)
+            g = -torch.log(-torch.log(torch.clamp(torch.rand(logits.shape, device=logits.device), min=1e-10, max=1)))
+            logits = logits + g
             one_hot_ind = torch.argmax(logits[:, :, :, -1], dim=2)
             for h in range(self.args.num_vq_head):
                 z_motion_one_hot[:, h, one_hot_ind[:, h].item(), -1] = 1
 
-        z_motion_one_hot = z_motion_one_hot.permute(0, 3, 1, 2).contiguous() # # (B, num_head, num_embedding, T) -> (B, T, num_head, num_embedding)
+        z_motion_one_hot = z_motion_one_hot.permute(0, 3, 1, 2).contiguous() # (B, num_head, num_embedding, T) -> (B, T, num_head, num_embedding)
         motions = self.motion_vae.decode_motion_one_hot(z_motion_one_hot)
 
         return motions.to(ori_device)

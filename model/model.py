@@ -138,6 +138,7 @@ class MotionVAE(Model):
     def decode_motion_one_hot(self, z_motion_one_hot: torch.Tensor):
         """
         :param z_motion_one_hot: (B, T, num_head, num_embedding)
+        return: motion
         """
         if self.net_G.training:
             self.net_G.eval()
@@ -146,6 +147,13 @@ class MotionVAE(Model):
         dec_m = self.net_G['motion_dec'](z_motion)
         dec_m = self.motion_processor.decode_motion(dec_m)
         return dec_m
+
+    def lookup_codebook(self, z_motion_one_hot: torch.Tensor):
+        """
+        :param z_motion_one_hot: (B, T, num_head, num_embedding)
+        return z_motion: (B, T, num_head, embedding_dim)
+        """
+        return self.net_G['motion_enc'].vae.lookup_codebook(z_motion_one_hot)
 
     def recon_motion(self, motions: torch.Tensor):
         motions = motions.to(self.device)
@@ -166,7 +174,7 @@ class MotionVAE(Model):
             recon_m = self.motion_processor.decode_motion(recon_m)
         elif self.args.vae_type == 'vqvae':
             num_down_sample_layers = sum([1 if x else 0 for x in self.args.encoder_downsample_layers])
-            random_indexes = torch.randint(self.args.num_embedding, size=[self.args.seq_len // 2**num_down_sample_layers, self.args.num_vq_head, 1], device=self.device)
+            random_indexes = torch.randint(self.args.num_embedding, size=[self.args.inf_seq_len // 2**num_down_sample_layers, self.args.num_vq_head, 1], device=self.device)
             random_encodings = torch.zeros(random_indexes.shape[0], self.args.num_vq_head, self.args.num_embedding, device=self.device)
             random_encodings.scatter_(2, random_indexes, 1)
             z_motion = torch.einsum('bhn,hnc->bhc', random_encodings, self.net_G['motion_enc'].vae._embedding).unsqueeze(0)

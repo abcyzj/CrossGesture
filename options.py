@@ -43,5 +43,7 @@ def get_parser():
     parser.add_argument('--audio_latent_dim', type=int, default=128)
     parser.add_argument('--prior_hidden_dim', type=int, default=128)
     parser.add_argument('--num_prior_dec_layer', type=int)
+    parser.add_argument('--prior_dec_input', type=str, default='onehot')
+    parser.add_argument('--inf_seq_len', type=int)
 
     return parser

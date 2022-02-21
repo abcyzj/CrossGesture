@@ -89,6 +89,7 @@ class VectorQuantizerEMA(nn.Module):
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
         B, T, *_ = input_shape
+        quantized = quantized.reshape(B, T, self._num_head, self._embedding_dim)
         encoding_indices = encodings.reshape(B, T, self._num_head, self._num_embeddings)
 
         return loss, quantized, perplexity, encoding_indices
@@ -206,15 +207,33 @@ class MotionDec(nn.Module):
     def forward(self, spec_feature: torch.Tensor):
         """
         Args:
-            inputs: input tensor of shape: (B, T, C)
+            inputs: input tensor of shape: (B, T, H, C) or (B, T, H*C)
         """
-        output = spec_feature
+        B, T, *_ = spec_feature.shape
+        output = spec_feature.reshape(B, T, -1)
         output = self.TCN(output.permute(0, 2, 1)).permute(0, 2, 1)
         output = self.pose_g(output)
         if self.args.joint_repr == 'dir_vec':
             return output
         else:
             raise NotImplementedError()
+
+    def forward_inference(self, motion_code: torch.Tensor): # 废弃了，这样没啥用
+        """
+        :param motion_code: (B, T, H, C) or (B, T, H*C)
+        """
+        B, latent_T, *_ = motion_code.shape
+        motion_code = motion_code.reshape(B, latent_T, -1)
+        num_down_sample_layers = sum([1 if x else 0 for x in self.args.encoder_downsample_layers])
+        code_seq_len = self.args.seq_len // 2**num_down_sample_layers
+        code_inf_seq_len = self.args.inf_seq_len // 2**num_down_sample_layers
+        seq_len = self.args.seq_len
+        assert latent_T >= code_seq_len
+        output = self.pose_g(self.TCN(motion_code[:, :code_seq_len].permute(0, 2, 1)).permute(0, 2, 1))
+        for i in range(code_seq_len//2, code_inf_seq_len - code_seq_len//2, code_seq_len//2):
+            output_tail = self.pose_g(self.TCN(motion_code[:, i:i+code_seq_len].permute(0, 2, 1)).permute(0, 2, 1))
+            output = torch.cat([output, output_tail[:, seq_len//2:]], dim=1)
+        return output
 
 
 class MelSpecEnc(nn.Module):
@@ -281,16 +300,21 @@ class PriorDec(nn.Module):
     def __init__(self, args):
         super().__init__()
 
+        self.args = args
+
         num_head = args.num_vq_head
         num_embedding = args.num_embedding
         hidden = args.prior_hidden_dim
         audio_dim = args.audio_latent_dim
 
-        self.embedding = nn.Conv1d(num_head*num_embedding, hidden, kernel_size=1)
+        if args.prior_dec_input == 'onehot':
+            self.embedding = nn.Conv1d(num_head*num_embedding, hidden, kernel_size=1)
+        elif args.prior_dec_input == 'embedding':
+            self.embedding = nn.Conv1d(num_head*args.pose_hidden_size, hidden, kernel_size=1)
         self.conv_layers = nn.ModuleList([
             CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=3, dilation=1) for _ in range(args.num_prior_dec_layer)
         ])
-        self.norm_layers = nn.ModuleList([nn.InstanceNorm1d(hidden) for _ in range(len(self.conv_layers))])
+        self.norm_layers = nn.ModuleList([nn.InstanceNorm1d(hidden, track_running_stats=True, affine=True) for _ in range(len(self.conv_layers))])
         self.logits = nn.Conv1d(hidden, num_head*num_embedding, kernel_size=1)
 
         self.num_head = num_head
@@ -304,8 +328,9 @@ class PriorDec(nn.Module):
             recep += layer.receptive_field() - 1
         return recep
 
-    def forward(self, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
+    def forward(self, motion_code: torch.Tensor, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
         """
+        :param motion_code: (B, num_hed, embedding_dim, T)
         :param motion_one_hot: (B, num_head, num_embedding, T)
         :param audio_code: (B, audio_latent_dim, T)
         :return logits: (B, num_head, num_embedding, T)
@@ -313,8 +338,10 @@ class PriorDec(nn.Module):
 
         B, _, _, T = motion_one_hot.shape
 
-        x = self.embedding(motion_one_hot.view(B, -1, T).contiguous())
-
+        if self.args.prior_dec_input == 'onehot':
+            x = self.embedding(motion_one_hot.view(B, -1, T).contiguous())
+        elif self.args.prior_dec_input == 'embedding':
+            x = self.embedding(motion_code.view(B, -1, T).contiguous())
         for conv, norm in zip(self.conv_layers, self.norm_layers):
             x = conv(x, audio_code)
             x = norm(x)
@@ -324,16 +351,22 @@ class PriorDec(nn.Module):
         logits = logits.reshape(B, self.num_head, self.num_embedding, T)
         return logits
 
-    def forward_inference(self, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
+    def forward_inference(self, motion_code: torch.Tensor, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
         """
+        :param motion_code: (1, num_head, embedding_dim, T)
         :param motion_one_hot: (1, num_head, num_embedding, T)
         :param audio_code: (1, audio_latent_dim, T + 1)
         :return logits: (1, num_head, num_embedding, T + 1)
         """
+        embedding_dim = motion_code.shape[2]
         _, num_head, num_embedding, T = motion_one_hot.shape
+        motion_code = torch.cat([motion_code, torch.zeros(1, num_head, embedding_dim, 1, device=motion_code.device)], dim=-1)
         motion_one_hot = torch.cat([motion_one_hot, torch.zeros(1, num_head, num_embedding, 1, device=motion_one_hot.device)], dim=-1)
 
-        x = self.embedding(motion_one_hot.view(1, -1, T + 1))
+        if self.args.prior_dec_input == 'onehot':
+            x = self.embedding(motion_one_hot.view(1, -1, T + 1))
+        elif self.args.prior_dec_input == 'embedding':
+            x = self.embedding(motion_code.view(1, -1, T + 1))
         for conv, norm in zip(self.conv_layers, self.norm_layers):
             x = conv(x, audio_code)
             x = norm(x)

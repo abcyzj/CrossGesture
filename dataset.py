@@ -38,7 +38,7 @@ class BaijiaDataset(MocapDataset):
         super().__init__(25, BAIJIA_SKELETON, BAIJIA_CAMERA)
 
         self.base_path = args.data_path
-        self.seq_len = args.seq_len
+        self.seq_len = args.seq_len if is_train else args.inf_seq_len
         self.seq_stride = args.seq_stride
         self.is_train = is_train
         self.num_downsample_layer = sum([1 if x else 0 for x in args.encoder_downsample_layers])
