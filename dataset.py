@@ -105,7 +105,7 @@ class BaijiaDataset(MocapDataset):
         self.wav_seq_list = []
         self.spec_list = []
         self.audio_sr_list = []
-        for key in tqdm(self.all_keys, 'Load Baijia dataset'):
+        for key in tqdm(self.all_keys[:100], 'Load Baijia dataset'):
             val = pickle.loads(self.db_txn.get(key))
             wav, spec, sr = val['audio_wav'], val['spec'], val['audio_sr']
             cur_len = min(val['keypoints_3d'].shape[0], math.floor(wav.shape[0] / sr * self.fps()))

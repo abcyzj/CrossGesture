@@ -353,25 +353,25 @@ class PriorDec(nn.Module):
 
     def forward_inference(self, motion_code: torch.Tensor, motion_one_hot: torch.Tensor, audio_code: torch.Tensor):
         """
-        :param motion_code: (1, num_head, embedding_dim, T)
-        :param motion_one_hot: (1, num_head, num_embedding, T)
-        :param audio_code: (1, audio_latent_dim, T + 1)
-        :return logits: (1, num_head, num_embedding, T + 1)
+        :param motion_code: (B, num_head, embedding_dim, T)
+        :param motion_one_hot: (B, num_head, num_embedding, T)
+        :param audio_code: (B, audio_latent_dim, T + 1)
+        :return logits: (B, num_head, num_embedding, T + 1)
         """
         embedding_dim = motion_code.shape[2]
-        _, num_head, num_embedding, T = motion_one_hot.shape
-        motion_code = torch.cat([motion_code, torch.zeros(1, num_head, embedding_dim, 1, device=motion_code.device)], dim=-1)
-        motion_one_hot = torch.cat([motion_one_hot, torch.zeros(1, num_head, num_embedding, 1, device=motion_one_hot.device)], dim=-1)
+        B, num_head, num_embedding, T = motion_one_hot.shape
+        motion_code = torch.cat([motion_code, torch.zeros(B, num_head, embedding_dim, 1, device=motion_code.device)], dim=-1)
+        motion_one_hot = torch.cat([motion_one_hot, torch.zeros(B, num_head, num_embedding, 1, device=motion_one_hot.device)], dim=-1)
 
         if self.args.prior_dec_input == 'onehot':
-            x = self.embedding(motion_one_hot.view(1, -1, T + 1))
+            x = self.embedding(motion_one_hot.view(B, -1, T + 1))
         elif self.args.prior_dec_input == 'embedding':
-            x = self.embedding(motion_code.view(1, -1, T + 1))
+            x = self.embedding(motion_code.view(B, -1, T + 1))
         for conv, norm in zip(self.conv_layers, self.norm_layers):
             x = conv(x, audio_code)
             x = norm(x)
             x = F.leaky_relu(x, 0.2)
 
         logits = self.logits(x)
-        logits = logits.reshape(1, self.num_head, self.num_embedding, T + 1)
+        logits = logits.reshape(B, self.num_head, self.num_embedding, T + 1)
         return logits

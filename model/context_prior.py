@@ -56,6 +56,8 @@ class ContextPrior(Model):
                 motions = data['keypoints'].float().to(self.device)
                 norm_spec = data['norm_spec'].float().to(self.device)
 
+                self.optim.zero_grad()
+
                 z_motion_one_hot, prior_logits = self.train_one_batch(motions, norm_spec)
                 loss = self.calculate_loss(z_motion_one_hot, prior_logits, batch)
 
@@ -96,10 +98,11 @@ class ContextPrior(Model):
         for t in range(latent_T):
             z_motion = self.motion_vae.lookup_codebook(z_motion_one_hot.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
             logits = self.net['prior_dec'].forward_inference(z_motion, z_motion_one_hot, audio_code[:, :, :t+1])
+            logprobs = F.log_softmax(logits, dim=2)
             z_motion_one_hot = torch.cat([z_motion_one_hot, torch.zeros(1, self.args.num_vq_head, self.args.num_embedding, 1, device=self.device)], dim=-1)
-            g = -torch.log(-torch.log(torch.clamp(torch.rand(logits.shape, device=logits.device), min=1e-10, max=1)))
-            logits = logits + g
-            one_hot_ind = torch.argmax(logits[:, :, :, -1], dim=2)
+            g = -torch.log(-torch.log(torch.clamp(torch.rand(logprobs.shape, device=logprobs.device), min=1e-10, max=1)))
+            logprobs = logprobs + g
+            one_hot_ind = torch.argmax(logprobs[:, :, :, -1], dim=2)            
             for h in range(self.args.num_vq_head):
                 z_motion_one_hot[:, h, one_hot_ind[:, h].item(), -1] = 1
 

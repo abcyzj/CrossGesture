@@ -45,5 +45,8 @@ def get_parser():
     parser.add_argument('--num_prior_dec_layer', type=int)
     parser.add_argument('--prior_dec_input', type=str, default='onehot')
     parser.add_argument('--inf_seq_len', type=int)
+    parser.add_argument('--prior_n_head', type=int, default=4)
+    parser.add_argument('--prior_d_inner', type=int, default=256)
+    parser.add_argument('--prior_seed_len', type=int, default=64)
 
     return parser
