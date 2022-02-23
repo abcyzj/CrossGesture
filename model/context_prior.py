@@ -1,3 +1,4 @@
+import itertools
 import logging
 import os
 
@@ -82,14 +83,45 @@ class ContextPrior(Model):
         loss = torch.stack(list(loss_dict.values())).sum()
         return loss
 
-    def inference(self, spec: torch.Tensor):
+    def beam_search(self, prefix_one_hot: torch.Tensor, logprobs: torch.Tensor, beam_size: int = 16):
+        """
+        :param prefix_one_hot: (B, num_head, num_embedding, T)
+        :param logprobs: (B, num_head, num_embedding, T + 1)
+        return beam_one_hot: (beam_size, num_head, num_embedding, T + 1)
+        """
+        B, num_head, num_embedding, _ = prefix_one_hot.shape
+        beam_one_hot = []
+        beam_logprobs = []
+        for b in range(B):
+            next_step_indices = []
+            for h in range(num_head):
+                _, cur_top_indices = logprobs[b, h, :, -1].topk(beam_size)
+                next_step_indices.append(cur_top_indices)
+            next_step_indices = itertools.product(*next_step_indices)
+            next_step_indices = [[x.item() for x in l] for l in next_step_indices]
+            next_step_indices = torch.LongTensor(next_step_indices).to(prefix_one_hot.device).unsqueeze(2)
+            next_step_one_hot = torch.zeros(next_step_indices.shape[0], num_head, num_embedding, device=prefix_one_hot.device)
+            next_step_one_hot.scatter_(2, next_step_indices, 1)
+            next_step_one_hot = next_step_one_hot.unsqueeze(3)
+            next_step_one_hot = torch.cat([torch.tile(prefix_one_hot[b], (next_step_one_hot.shape[0], 1, 1, 1)), next_step_one_hot], dim=-1)
+            beam_one_hot.append(next_step_one_hot)
+            nextstep_logprobs = torch.sum(next_step_one_hot * logprobs[[b]], (1, 2, 3))
+            beam_logprobs.append(nextstep_logprobs)
+        beam_one_hot = torch.cat(beam_one_hot, dim=0)
+        beam_logprobs = torch.cat(beam_logprobs, dim=0)
+        _, top_indices = beam_logprobs.topk(beam_size, dim=0)
+        return beam_one_hot[top_indices].contiguous()
+
+    def inference(self, spec: torch.Tensor, ori_m: torch.Tensor):
         """
         :param audio: (B, T, audio_dim)
-        :return: (B, T, num_head, num_embedding)
+        :param ori_m: (B, T, 30)
+        return: (B, T, num_head, num_embedding)
         """
         self.net.eval()
         ori_device = spec.device
         spec = spec.to(self.device)
+        ori_m = ori_m.to(self.device)
         audio_code = self.net['spec_enc'](spec)
         audio_code = audio_code.permute(0, 2, 1).contiguous() # (B, T, audio_dim) -> (B, audio_dim, T)
         latent_T = audio_code.shape[-1]
@@ -99,14 +131,18 @@ class ContextPrior(Model):
             z_motion = self.motion_vae.lookup_codebook(z_motion_one_hot.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
             logits = self.net['prior_dec'].forward_inference(z_motion, z_motion_one_hot, audio_code[:, :, :t+1])
             logprobs = F.log_softmax(logits, dim=2)
+            # z_motion_one_hot = self.beam_search(z_motion_one_hot, logprobs)
             z_motion_one_hot = torch.cat([z_motion_one_hot, torch.zeros(1, self.args.num_vq_head, self.args.num_embedding, 1, device=self.device)], dim=-1)
             g = -torch.log(-torch.log(torch.clamp(torch.rand(logprobs.shape, device=logprobs.device), min=1e-10, max=1)))
-            logprobs = logprobs + g
-            one_hot_ind = torch.argmax(logprobs[:, :, :, -1], dim=2)            
+            logprobs += g
+            one_hot_ind = torch.argmax(logits[:, :, :, -1], dim=2)
             for h in range(self.args.num_vq_head):
                 z_motion_one_hot[:, h, one_hot_ind[:, h].item(), -1] = 1
 
-        z_motion_one_hot = z_motion_one_hot.permute(0, 3, 1, 2).contiguous() # (B, num_head, num_embedding, T) -> (B, T, num_head, num_embedding)
+        z_motion_one_hot = z_motion_one_hot[[0]].permute(0, 3, 1, 2).contiguous() # (B, num_head, num_embedding, T) -> (B, T, num_head, num_embedding)
+        print(torch.argmax(z_motion_one_hot, dim=3))
+        _, ori_motion_one_hot = self.motion_vae.encode_motion(ori_m)
+        print(torch.argmax(ori_motion_one_hot, dim=3))
         motions = self.motion_vae.decode_motion_one_hot(z_motion_one_hot)
 
         return motions.to(ori_device)

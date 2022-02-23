@@ -19,8 +19,9 @@ def inference(prior_model, dataset, args):
     for i in range(n_repeat):
         sample_index = rng.randint(0, n_sample)
         spec = torch.Tensor(dataset[sample_index]['norm_spec']).unsqueeze(0)
+        ori_m = torch.Tensor(dataset[sample_index]['keypoints']).unsqueeze(0)
         with torch.no_grad():
-            gen_m = prior_model.inference(spec).squeeze().cpu().numpy()
+            gen_m = prior_model.inference(spec, ori_m).squeeze().cpu().numpy()
         ori_m = dataset[sample_index]['keypoints'].copy()
         ori_m = dataset.normalized_dir_vec_to_keypoints(ori_m)
         ori_m = dataset.camera_to_world(ori_m)

@@ -128,6 +128,8 @@ class CausalConvolution(nn.Module):
         self.audio_linear = nn.Conv1d(audio_dim, ch_out, kernel_size=1)
 
         self.causal = nn.Conv1d(ch_in, ch_out, kernel_size=kernel_size, dilation=dilation)
+        self.norm = nn.InstanceNorm1d(ch_out, track_running_stats=True, affine=True)
+        self.dropout = nn.Dropout(0.1)
 
         self.reset()
 
@@ -145,6 +147,9 @@ class CausalConvolution(nn.Module):
         """
         h = F.pad(context[:, :, :-1], [self.receptive_field(), 0])
         y = self.causal(h)
+
+        y = self.norm(y) # direct
+        y = self.dropout(y)
 
         if audio is not None:
             audio_latent = self.audio_linear(audio)

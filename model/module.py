@@ -100,7 +100,7 @@ class VectorQuantizerEMA(nn.Module):
         return: (B, T, num_head, embedding_dim)
         """
         B, T, *_ = z_motion_one_hot.shape
-        z_motion_one_hot = z_motion_one_hot.view(-1, self._num_head, self._num_embeddings)
+        z_motion_one_hot = z_motion_one_hot.reshape(-1, self._num_head, self._num_embeddings)
         embeddings = torch.einsum('bhn,hnc->bhc', z_motion_one_hot, self._embedding)
         return embeddings.reshape(B, T, self._num_head, self._embedding_dim)
 
@@ -314,7 +314,6 @@ class PriorDec(nn.Module):
         self.conv_layers = nn.ModuleList([
             CausalConvolution(ch_in=hidden, ch_out=hidden, audio_dim=audio_dim, kernel_size=3, dilation=1) for _ in range(args.num_prior_dec_layer)
         ])
-        self.norm_layers = nn.ModuleList([nn.InstanceNorm1d(hidden, track_running_stats=True, affine=True) for _ in range(len(self.conv_layers))])
         self.logits = nn.Conv1d(hidden, num_head*num_embedding, kernel_size=1)
 
         self.num_head = num_head
@@ -342,9 +341,8 @@ class PriorDec(nn.Module):
             x = self.embedding(motion_one_hot.view(B, -1, T).contiguous())
         elif self.args.prior_dec_input == 'embedding':
             x = self.embedding(motion_code.view(B, -1, T).contiguous())
-        for conv, norm in zip(self.conv_layers, self.norm_layers):
+        for conv in self.conv_layers:
             x = conv(x, audio_code)
-            x = norm(x)
             x = F.leaky_relu(x, 0.2)
 
         logits = self.logits(x)
@@ -367,9 +365,8 @@ class PriorDec(nn.Module):
             x = self.embedding(motion_one_hot.view(B, -1, T + 1))
         elif self.args.prior_dec_input == 'embedding':
             x = self.embedding(motion_code.view(B, -1, T + 1))
-        for conv, norm in zip(self.conv_layers, self.norm_layers):
+        for conv in self.conv_layers:
             x = conv(x, audio_code)
-            x = norm(x)
             x = F.leaky_relu(x, 0.2)
 
         logits = self.logits(x)
