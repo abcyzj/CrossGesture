@@ -1,12 +1,14 @@
 import logging
 import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+from transformer.models import Generator
+
 from model.module import MelSpecEnc
 
-from transformer.models import Generator
 from .model import Model, MotionVAE
 
 
@@ -22,8 +24,8 @@ class TransformerPrior(Model):
         num_downsample_layers = sum([1 if x else 0 for x in args.encoder_downsample_layers])
         self.seed_code_len = args.prior_seed_len // 2**num_downsample_layers
         self.tgt_code_len = args.seq_len // 2**num_downsample_layers
-        d_k = args.pose_hidden_size // args.num_prior_dec_head
-        d_v = args.pose_hidden_size // args.num_prior_dec_head
+        d_k = args.pose_hidden_size // args.prior_n_head
+        d_v = args.pose_hidden_size // args.prior_n_head
         self.net = nn.ModuleDict({
             'input_embed': nn.Linear(args.num_embedding*args.num_vq_head, args.pose_hidden_size, bias=False),
             'gen': Generator(
@@ -38,7 +40,7 @@ class TransformerPrior(Model):
                 self.seed_code_len,
                 self.tgt_code_len
                 ),
-            'output': nn.Linear(args.pose_hidden_dim, args.num_embedding*args.num_vq_head),
+            'output': nn.Linear(args.pose_hidden_size, args.num_embedding*args.num_vq_head),
             'spec_enc': MelSpecEnc(args)
         }).to(self.device)
 
@@ -58,7 +60,7 @@ class TransformerPrior(Model):
             for batch, data in enumerate(tqdm(dataloader, f'Epoch {self.epoch}')):
                 motions = data['keypoints'].float().to(self.device)
                 norm_spec = data['norm_spec'].float().to(self.device)
-                
+
                 self.optim.zero_grad()
 
                 tgt_code_one_hot, prior_logits = self.train_one_batch(motions, norm_spec)
@@ -76,14 +78,14 @@ class TransformerPrior(Model):
     def train_one_batch(self, motions: torch.Tensor, norm_spec: torch.Tensor):
         with torch.no_grad():
             _, z_motion_one_hot = self.motion_vae.encode_motion(motions)
-        
-        B, T, *_ = motions.shape
+
+        B, *_ = motions.shape
         seed_code_one_hot = z_motion_one_hot[:, :self.seed_code_len]
         tgt_code_one_hot = z_motion_one_hot[:, self.seed_code_len:]
-        audio_code = self.net['spec_enc'](norm_spec[:, :self.seed_code_len])
-        seed_code = self.net['input_embed'](seed_code_one_hot.reshape(B, T, -1))
+        audio_code = self.net['spec_enc'](norm_spec[:, self.seed_code_len:])
+        seed_code = self.net['input_embed'](seed_code_one_hot.reshape(B, self.seed_code_len, -1))
         prior_output = self.net['gen'](seed_code, audio_code)
-        prior_logits = self.net['output'](prior_output).reshape(B, T, self.args.num_vq_head, self.args.num_embedding)
+        prior_logits = self.net['output'](prior_output).reshape(B, self.tgt_code_len, self.args.num_vq_head, self.args.num_embedding)
 
         return tgt_code_one_hot, prior_logits
 
@@ -93,7 +95,7 @@ class TransformerPrior(Model):
         :param prior_logits: (B, T, num_head, num_embedding)
         """
         loss_dict = {
-            'corss_entro/context_prior': F.cross_entropy(prior_logits.permute(0, 3, 1, 2), tgt_code_one_hot.permute(0, 3, 1, 2))
+            'cross_entro/context_prior': F.cross_entropy(prior_logits.permute(0, 3, 1, 2), tgt_code_one_hot.permute(0, 3, 1, 2))
         }
         self.log(batch, loss_dict)
         loss = torch.stack(list(loss_dict.values())).sum()
@@ -113,3 +115,35 @@ class TransformerPrior(Model):
         self.net.load_state_dict(state['net'])
         self.epoch = state['epoch']
         self.global_step = state['global_step']
+
+    def inference(self, seed_motion: torch.Tensor, norm_spec: torch.Tensor):
+        """
+        :param seed_motion: (B, T_seed, 30)
+        :param norm_spec: (B, T_tgt, audio_dim)
+        """
+        self.net.eval()
+        ori_device = seed_motion.device
+        seed_motion = seed_motion.to(self.device)
+        norm_spec = norm_spec.to(self.device)
+        B = seed_motion.shape[0]
+        _, seed_motion_one_hot = self.motion_vae.encode_motion(seed_motion)
+        z_motion_one_hot = [seed_motion_one_hot]
+        for i in range(self.args.inf_seq_len // self.args.seq_len):
+            audio_code = self.net['spec_enc'](norm_spec[:, i*self.tgt_code_len:(i+1)*self.tgt_code_len])
+            seed_code = self.net['input_embed'](seed_motion_one_hot.reshape(B, self.seed_code_len, -1))
+            prior_output = self.net['gen'](seed_code, audio_code)
+            prior_logits = self.net['output'](prior_output).reshape(B, self.tgt_code_len, self.args.num_vq_head, self.args.num_embedding)
+
+            logprobs = F.log_softmax(prior_logits, dim=3)
+            if self.args.prior_inf_sample:
+                g = -torch.log(-torch.log(torch.clamp(torch.rand(logprobs.shape, device=logprobs.device), min=1e-10, max=1)))
+                logprobs += g
+            one_hot_ind = torch.argmax(logprobs, dim=3, keepdim=True)
+            cur_z_motion_one_hot = torch.zeros(B, self.tgt_code_len, self.args.num_vq_head, self.args.num_embedding, device=self.device)
+            cur_z_motion_one_hot.scatter_(3, one_hot_ind, 1)
+            z_motion_one_hot.append(cur_z_motion_one_hot)
+            seed_motion_one_hot = cur_z_motion_one_hot[:, -self.seed_code_len:]
+
+        z_motion_one_hot = torch.cat(z_motion_one_hot, dim=1)
+        motions = self.motion_vae.decode_motion_one_hot(z_motion_one_hot)
+        return motions.to(ori_device)

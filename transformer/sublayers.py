@@ -53,7 +53,7 @@ class MultiHeadAttention(nn.Module):
         q = q.transpose(1, 2).contiguous().view(batch_size, len_q, -1)
         q = self.dropout(q)
         q += residual
-        
+
         q = self.layer_norm(q)
 
         return q, attn
@@ -64,8 +64,8 @@ class FeedForward(nn.Module):
         super().__init__()
         self.is_conv = is_conv
         if is_conv:
-            self.w_1 = nn.Conv1d(d_in, d_hid, kernel_size=hparams.ff_conv1d_kernel[0], padding=hparams.ff_conv1d_pad[0])
-            self.w_2 = nn.Conv1d(d_hid, d_in, kernel_size=hparams.ff_conv1d_kernel[1], padding=hparams.ff_conv1d_pad[1])
+            self.w_1 = nn.Conv1d(d_in, d_hid, kernel_size=3, padding=1)
+            self.w_2 = nn.Conv1d(d_hid, d_in, kernel_size=1, padding=0)
         else:
             self.w_1 = nn.Linear(d_in, d_hid)
             self.w_2 = nn.Linear(d_hid, d_in)

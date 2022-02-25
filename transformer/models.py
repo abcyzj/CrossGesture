@@ -105,6 +105,10 @@ class Decoder(nn.Module):
             ])
         self.mel_layer_norm = nn.LayerNorm(d_model)
 
+        self.dec_layers = nn.ModuleList([
+            DecoderLayer(d_model, d_inner, n_head, d_k, d_v, is_conv=is_conv, dropout=dropout) for _ in range(n_layers)
+        ])
+
     def forward(self, melspec, self_attn_mask, enc_output, dec_enc_attn_mask, return_attn=False):
         slf_attn_list, dec_enc_attn_list = [], []
 

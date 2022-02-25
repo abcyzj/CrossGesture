@@ -279,7 +279,7 @@ class MelSpecEnc(nn.Module):
         B, T = spec.shape[0], spec.shape[1]
 
         # Convert to the right dimensionality
-        x = spec.view(-1, spec.shape[2], spec.shape[3])
+        x = spec.reshape(-1, spec.shape[2], spec.shape[3])
         x = self.convert_dimensions(x)
 
         # Process stacks
