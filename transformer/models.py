@@ -94,7 +94,7 @@ class KeypointDecoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, d_mel, d_model, n_layers, n_head, d_k, d_v, d_inner, is_conv=False, dropout=0.1, n_position=100):
+    def __init__(self, d_mel, d_word, d_model, n_layers, downsample_layers, n_head, d_k, d_v, d_inner, is_conv=False, dropout=0.1, n_position=100):
         super().__init__()
 
         self.mel_embed_layer = nn.Linear(d_mel, d_model)
@@ -105,11 +105,24 @@ class Decoder(nn.Module):
             ])
         self.mel_layer_norm = nn.LayerNorm(d_model)
 
+        self.silence_embed = nn.Linear(1, d_model, bias=False)
+        self.word_embed_layer = nn.Linear(d_word, d_model)
+        num_downsample_layer = sum([1 if x else 0 for x in downsample_layers])
+        self.word_pos_enc = PositionalEncoding(n_position*2**num_downsample_layer, d_model)
+        self.word_dropout = nn.Dropout(dropout)
+        self.word_layers = nn.ModuleList([
+            EncoderLayer(d_model, d_inner, n_head, d_k, d_v, downsample=downsample_layers[i], is_conv=is_conv, dropout=dropout) for i in range(n_layers)
+        ])
+        self.word_layer_norm = nn.LayerNorm(d_model)
+
+        self.position_enc = PositionalEncoding(n_position, d_model)
+        self.dropout = nn.Dropout(dropout)
         self.dec_layers = nn.ModuleList([
             DecoderLayer(d_model, d_inner, n_head, d_k, d_v, is_conv=is_conv, dropout=dropout) for _ in range(n_layers)
         ])
+        self.layer_norm = nn.LayerNorm(d_model)
 
-    def forward(self, melspec, self_attn_mask, enc_output, dec_enc_attn_mask, return_attn=False):
+    def forward(self, melspec, word_embedding, silence, self_attn_mask, enc_output, dec_enc_attn_mask, return_attn=False):
         slf_attn_list, dec_enc_attn_list = [], []
 
         mel_embed = self.mel_embed_layer(melspec)
@@ -118,7 +131,13 @@ class Decoder(nn.Module):
             mel_input, _ = layer(mel_input, self_attn_mask=self_attn_mask)
         mel_input = self.mel_layer_norm(mel_input)
 
-        dec_output = mel_input
+        word_embed = self.word_embed_layer(word_embedding) + self.silence_embed(silence)
+        word_input = self.word_dropout(self.word_pos_enc(word_embed))
+        for layer in self.word_layers:
+            word_input, _ = layer(word_input, self_attn_mask=self_attn_mask)
+        word_input = self.word_layer_norm(word_input)
+        dec_output = self.dropout(self.position_enc(mel_input + word_input))
+        dec_output = self.layer_norm(dec_output)
 
         for dec_layer in self.dec_layers:
             dec_output, slf_attn, dec_enc_attn = dec_layer(
@@ -135,15 +154,15 @@ class Decoder(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, d_param, d_mel, d_model, n_layers, n_head, d_k, d_v, d_inner, seed_len, predict_len, enc_conv=True, dec_conv=True, dropout=0.1):
+    def __init__(self, d_param, d_mel, d_word, d_model, n_layers, downsample_layer, n_head, d_k, d_v, d_inner, seed_len, predict_len, enc_conv=True, dec_conv=True, dropout=0.1):
         super().__init__()
 
         self.encoder = Encoder(d_param, d_model, n_layers, n_head, d_k, d_v, d_inner, is_conv=enc_conv, dropout=dropout, n_position=seed_len)
-        self.decoder = Decoder(d_mel, d_model, n_layers, n_head, d_k, d_v, d_inner, is_conv=dec_conv, dropout=dropout, n_position=predict_len)
+        self.decoder = Decoder(d_mel, d_word, d_model, n_layers, downsample_layer, n_head, d_k, d_v, d_inner, is_conv=dec_conv, dropout=dropout, n_position=predict_len)
         self.fc = nn.Linear(d_model, d_param)
 
-    def forward(self, seed_k_seq, melspec):
+    def forward(self, seed_k_seq, melspec, word_embedding, silence):
         enc_output = self.encoder(seed_k_seq, self_attn_mask=None)
-        dec_output = self.decoder(melspec, None, enc_output, None)
+        dec_output = self.decoder(melspec, word_embedding, silence, None, enc_output, None)
         output = self.fc(dec_output)
         return output

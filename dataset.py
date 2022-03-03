@@ -82,15 +82,19 @@ class BaijiaDataset(MocapDataset):
         keypoints = self.keypoints_to_normalized_dir_vec(keypoints_3d[start_frame:end_frame])
         ori_audio = self.wav_seq_list[cur_index][int(start_frame*ori_sample_per_frame):int(end_frame*ori_sample_per_frame)]
         norm_spec = self.spec_list[cur_index][:, int(start_frame*spec_sample_per_frame):int(end_frame*spec_sample_per_frame)]
+        word_embed = self.word_embed_list[cur_index][start_frame:end_frame]
+        silence = self.silence_list[cur_index][start_frame:end_frame]
         return  {
             'keypoints': keypoints,
             'ori_audio': ori_audio,
             'norm_spec': spec_chunking(norm_spec, frame_rate=self.fps(), chunk_size=21, stride=2**self.num_downsample_layer),
-            'ori_sr': ori_sr
+            'ori_sr': ori_sr,
+            'word_embed': word_embed,
+            'silence': silence
         }
 
     def _init_lmdb(self):
-        self.db_env = lmdb.open(os.path.join(self.base_path, 'baijia_audio'), map_size=20*1024**3, readonly=True, lock=False, max_dbs=64)
+        self.db_env = lmdb.open(os.path.join(self.base_path, 'baijia_all'), map_size=20*1024**3, readonly=True, lock=False, max_dbs=64)
         self.db_txn = self.db_env.begin(write=False)
         db_keys = list(self.db_txn.cursor().iternext(values=False))
         rng = np.random.RandomState(8848)
@@ -107,6 +111,8 @@ class BaijiaDataset(MocapDataset):
         self.wav_seq_list = []
         self.spec_list = []
         self.audio_sr_list = []
+        self.word_embed_list = []
+        self.silence_list = []
         for key in tqdm(self.all_keys, 'Load Baijia dataset'):
             val = pickle.loads(self.db_txn.get(key))
             wav, spec, sr = val['audio_wav'], val['spec'], val['audio_sr']
@@ -126,6 +132,8 @@ class BaijiaDataset(MocapDataset):
             spec = np.transpose(spec, (1, 0))
             self.spec_list.append(spec.copy())
             self.audio_sr_list.append(sr)
+            self.word_embed_list.append(val['word_embedding'])
+            self.silence_list.append(val['silence'])
 
         all_pose_frames = np.vstack(self.pose_seq_list)
         bone_lengths = []

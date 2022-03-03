@@ -27,12 +27,14 @@ class TransformerPrior(Model):
         d_k = args.pose_hidden_size // args.prior_n_head
         d_v = args.pose_hidden_size // args.prior_n_head
         self.net = nn.ModuleDict({
-            'input_embed': nn.Linear(args.num_embedding*args.num_vq_head, args.pose_hidden_size, bias=False),
+            'seed_embed': nn.Linear(args.num_embedding*args.num_vq_head, args.pose_hidden_size, bias=False),
             'gen': Generator(
                 args.pose_hidden_size,
                 args.audio_latent_dim,
+                args.prior_d_word,
                 args.pose_hidden_size,
                 args.num_prior_dec_layer,
+                args.prior_downsample_layer,
                 args.prior_n_head,
                 d_k,
                 d_v,
@@ -60,10 +62,12 @@ class TransformerPrior(Model):
             for batch, data in enumerate(tqdm(dataloader, f'Epoch {self.epoch}')):
                 motions = data['keypoints'].float().to(self.device)
                 norm_spec = data['norm_spec'].float().to(self.device)
+                word_embedding = data['word_embed'].float().to(self.device)
+                silence = data['silence'].float().to(self.device)
 
                 self.optim.zero_grad()
 
-                tgt_code_one_hot, prior_logits = self.train_one_batch(motions, norm_spec)
+                tgt_code_one_hot, prior_logits = self.train_one_batch(motions, norm_spec, word_embedding, silence)
                 loss = self.calculate_loss(tgt_code_one_hot, prior_logits, batch)
 
                 loss.backward()
@@ -75,7 +79,7 @@ class TransformerPrior(Model):
             if self.epoch % self.args.save_freq == 0:
                 self.save(loss.item())
 
-    def train_one_batch(self, motions: torch.Tensor, norm_spec: torch.Tensor):
+    def train_one_batch(self, motions: torch.Tensor, norm_spec: torch.Tensor, word_embedding: torch.Tensor, silence: torch.Tensor):
         with torch.no_grad():
             _, z_motion_one_hot = self.motion_vae.encode_motion(motions)
 
@@ -83,8 +87,10 @@ class TransformerPrior(Model):
         seed_code_one_hot = z_motion_one_hot[:, :self.seed_code_len]
         tgt_code_one_hot = z_motion_one_hot[:, self.seed_code_len:]
         audio_code = self.net['spec_enc'](norm_spec[:, self.seed_code_len:])
-        seed_code = self.net['input_embed'](seed_code_one_hot.reshape(B, self.seed_code_len, -1))
-        prior_output = self.net['gen'](seed_code, audio_code)
+        seed_code = self.net['seed_embed'](seed_code_one_hot.reshape(B, self.seed_code_len, -1))
+        word_embedding = word_embedding[:, self.args.prior_seed_len:]
+        silence = silence[:, self.args.prior_seed_len:]
+        prior_output = self.net['gen'](seed_code, audio_code, word_embedding, silence)
         prior_logits = self.net['output'](prior_output).reshape(B, self.tgt_code_len, self.args.num_vq_head, self.args.num_embedding)
 
         return tgt_code_one_hot, prior_logits
@@ -116,22 +122,24 @@ class TransformerPrior(Model):
         self.epoch = state['epoch']
         self.global_step = state['global_step']
 
-    def inference(self, seed_motion: torch.Tensor, norm_spec: torch.Tensor):
+    def inference(self, seed_motion: torch.Tensor, norm_spec: torch.Tensor, word_embedding: torch.Tensor, silence: torch.Tensor):
         """
         :param seed_motion: (B, T_seed, 30)
         :param norm_spec: (B, T_tgt, audio_dim)
         """
         self.net.eval()
         ori_device = seed_motion.device
-        seed_motion = seed_motion.to(self.device)
-        norm_spec = norm_spec.to(self.device)
+        seed_motion = seed_motion.float().to(self.device)
+        norm_spec = norm_spec.float().to(self.device)
+        word_embedding = word_embedding.float().to(self.device)
+        silence = silence.float().to(self.device)
         B = seed_motion.shape[0]
         _, seed_motion_one_hot = self.motion_vae.encode_motion(seed_motion)
         z_motion_one_hot = [seed_motion_one_hot]
         for i in range(self.args.inf_seq_len // self.args.seq_len):
             audio_code = self.net['spec_enc'](norm_spec[:, i*self.tgt_code_len:(i+1)*self.tgt_code_len])
-            seed_code = self.net['input_embed'](seed_motion_one_hot.reshape(B, self.seed_code_len, -1))
-            prior_output = self.net['gen'](seed_code, audio_code)
+            seed_code = self.net['seed_embed'](seed_motion_one_hot.reshape(B, self.seed_code_len, -1))
+            prior_output = self.net['gen'](seed_code, audio_code, word_embedding[:, i*self.args.seq_len:(i+1)*self.args.seq_len], silence[:, i*self.args.seq_len:(i+1)*self.args.seq_len])
             prior_logits = self.net['output'](prior_output).reshape(B, self.tgt_code_len, self.args.num_vq_head, self.args.num_embedding)
 
             logprobs = F.log_softmax(prior_logits, dim=3)

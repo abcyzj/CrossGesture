@@ -47,6 +47,8 @@ def get_parser():
     parser.add_argument('--inf_seq_len', type=int)
     parser.add_argument('--prior_n_head', type=int, default=4)
     parser.add_argument('--prior_d_inner', type=int, default=256)
+    parser.add_argument('--prior_d_word', type=int, default=768)
+    parser.add_argument('--prior_downsample_layer', nargs='+', type=int)
     parser.add_argument('--prior_seed_len', type=int, default=64)
     parser.add_argument('--prior_inf_sample', action='store_true')
 

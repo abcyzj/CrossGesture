@@ -4,14 +4,20 @@ from transformer.sublayers import FeedForward, MultiHeadAttention
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, d_model, d_hid, n_head, d_k, d_v, is_conv=True, dropout=0.1):
+    def __init__(self, d_model, d_hid, n_head, d_k, d_v, downsample=False, is_conv=True, dropout=0.1):
         super().__init__()
         self.slf_attention = MultiHeadAttention(n_head, d_model, d_k, d_v, dropout)
         self.ffn = FeedForward(d_model, d_hid, is_conv=is_conv, dropout=dropout)
+        if downsample:
+            self.downsample = nn.AvgPool1d(2)
+        else:
+            self.downsample = None
 
     def forward(self, enc_input, self_attn_mask=None):
         enc_output, enc_slf_attn = self.slf_attention(enc_input, enc_input, enc_input, mask=self_attn_mask)
         enc_output = self.ffn(enc_output)
+        if self.downsample is not None:
+            enc_output = self.downsample(enc_output.transpose(1, 2)).transpose(1, 2)
         return enc_output, enc_slf_attn
 
 

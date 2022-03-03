@@ -24,8 +24,10 @@ def inference(prior_model, dataset, args):
         sample_index = rng.randint(0, n_sample)
         spec = torch.Tensor(dataset[sample_index]['norm_spec'][prior_model.seed_code_len:].copy()).unsqueeze(0)
         seed_motion = torch.Tensor(dataset[sample_index]['keypoints'][:args.prior_seed_len].copy()).unsqueeze(0)
+        word_embed = torch.Tensor(dataset[sample_index]['word_embed'][args.prior_seed_len:].copy()).unsqueeze(0)
+        silence = torch.Tensor(dataset[sample_index]['silence'][args.prior_seed_len:].copy()).unsqueeze(0)
         with torch.no_grad():
-            gen_m = prior_model.inference(seed_motion, spec).squeeze().cpu().numpy()
+            gen_m = prior_model.inference(seed_motion, spec, word_embed, silence).squeeze().cpu().numpy()
         ori_m = dataset[sample_index]['keypoints'].copy()
         ori_m = dataset.normalized_dir_vec_to_keypoints(ori_m)
         ori_m = dataset.camera_to_world(ori_m)
@@ -51,6 +53,9 @@ def inference(prior_model, dataset, args):
 if __name__ == '__main__':
     parser = get_parser()
     args = parser.parse_args()
+
+    if args.inf_seq_len is None:
+        args.inf_seq_len = args.seq_len
 
     if args.dataset == 'Baijia':
         dataset = BaijiaDataset(args, is_train=False)
