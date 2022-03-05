@@ -29,11 +29,11 @@ def evaluate(prior_model, dataloader, dataset, args):
         gen_m = dataset.normalized_dir_vec_to_keypoints(gen_m)
         gen_m = dataset.camera_to_world(gen_m)
 
-        ori_a = np.diff(ori_m[:, args.prior_seed_len:], n=2, axis=1)
-        gen_a = np.diff(gen_m[:, args.prior_seed_len:], n=2, axis=1)
-        cur_mad = np.linalg.norm(ori_a - gen_a, axis=2)
+        ori_a = np.gradient(np.gradient(ori_m[:, args.prior_seed_len:], axis=1), axis=1)
+        gen_a = np.gradient(np.gradient(gen_m[:, args.prior_seed_len:], axis=1), axis=1)        
+        cur_mad = np.linalg.norm(ori_a - gen_a, axis=3)
 
-        cur_maej = np.linalg.norm(ori_m[:, args.prior_seed_len:] - gen_m[:, args.prior_seed_len:], axis=2)
+        cur_maej = np.linalg.norm(ori_m[:, args.prior_seed_len:] - gen_m[:, args.prior_seed_len:], axis=3)
         maej.append(cur_maej)
         mad.append(cur_mad)
 
