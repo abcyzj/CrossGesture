@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy import signal
 
 from dataset import BaijiaDataset
 from model.model import MotionVAE
@@ -22,6 +23,8 @@ def inference(model, dataset, args):
         with torch.no_grad():
             recon_m = model.recon_motion(motions).cpu().numpy().squeeze()
             sample_m = model.sample_motion().cpu().numpy().squeeze()
+        butter_b, butter_a = signal.butter(10, 3, btype='low', analog=False, output='ba', fs=25)
+        recon_m = signal.filtfilt(butter_b, butter_a, recon_m, axis=0, padlen=None)
         recon_m = dataset.normalized_dir_vec_to_keypoints(recon_m)
         sample_m = dataset.normalized_dir_vec_to_keypoints(sample_m)
         ori_m = motions.cpu().numpy().squeeze()
@@ -35,6 +38,9 @@ def inference(model, dataset, args):
 if __name__ == '__main__':
     parser = get_parser()
     args = parser.parse_args()
+
+    if args.inf_seq_len is None:
+        args.inf_seq_len = args.seq_len
 
     if args.dataset == 'Baijia':
         dataset = BaijiaDataset(args, is_train=False)

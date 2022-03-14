@@ -1,11 +1,15 @@
+import os
 from pathlib import Path
 import shlex
 from subprocess import Popen, DEVNULL
 from sys import stderr
+import warnings
 
 import numpy as np
 import soundfile as sf
 import torch
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from dataset import BaijiaDataset
 from model.transformer_prior import TransformerPrior
@@ -14,13 +18,15 @@ from vis import render_animation
 
 
 def inference(prior_model, dataset, args):
-    n_repeat = 10
+    n_repeat = 100
     n_sample = len(dataset)
     rng = np.random.RandomState(8848)
     result_dir = Path(args.result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    for i in range(n_repeat):
+    scores = []
+
+    for i in tqdm(range(n_repeat)):
         sample_index = rng.randint(0, n_sample)
         spec = torch.Tensor(dataset[sample_index]['norm_spec'][prior_model.seed_code_len:].copy()).unsqueeze(0)
         seed_motion = torch.Tensor(dataset[sample_index]['keypoints'][:args.prior_seed_len].copy()).unsqueeze(0)
@@ -33,21 +39,33 @@ def inference(prior_model, dataset, args):
         ori_m = dataset.camera_to_world(ori_m)
         gen_m = dataset.normalized_dir_vec_to_keypoints(gen_m)
         gen_m = dataset.camera_to_world(gen_m)
-        poses = {'Original': ori_m, 'Gen': gen_m}
-        tmp_video_f = result_dir.joinpath(f'recon_{i}_tmp.mp4')
-        tmp_audio_f = result_dir.joinpath(f'recon_{i}.wav')
-        final_video_f = result_dir.joinpath(f'recon_{i}.mp4')
-        render_animation(poses, dataset.skeleton(), dataset.fps(), 3000, dataset.camera()['azimuth'], tmp_video_f.as_posix())
-        audio = dataset[sample_index]['ori_audio']
-        sf.write(tmp_audio_f.as_posix(), audio, dataset[sample_index]['ori_sr'])
-        p = Popen(
-            shlex.split(f'ffmpeg -y -i {tmp_video_f.as_posix()} -i {tmp_audio_f.as_posix()} -map 0 -map 1:a -c:v copy -shortest {final_video_f.as_posix()}'),
-            stdout=DEVNULL,
-            stderr=DEVNULL
-        )
-        p.wait()
-        tmp_video_f.unlink()
-        tmp_audio_f.unlink()
+
+        ori_v = np.gradient(ori_m[args.prior_seed_len:], axis=0)
+        ori_v_max_ind = np.argmax(np.linalg.norm(ori_v, axis=2), axis=0)
+        gen_v = np.gradient(gen_m[args.prior_seed_len:], axis=0)
+        j_ind = 7
+        l = ori_v_max_ind[j_ind] // 16
+        r = l + 16
+        score = np.dot(gen_v[l:r, j_ind], ori_v[ori_v_max_ind[j_ind], j_ind])
+        scores.append(score.max())
+
+    print(f'Mean score: {np.mean(scores)}')
+
+        # poses = {'Original': ori_m, 'Gen': gen_m}
+        # tmp_video_f = result_dir.joinpath(f'recon_{i}_tmp.mp4')
+        # tmp_audio_f = result_dir.joinpath(f'recon_{i}.wav')
+        # final_video_f = result_dir.joinpath(f'recon_{i}.mp4')
+        # render_animation(poses, dataset.skeleton(), dataset.fps(), 3000, dataset.camera()['azimuth'], tmp_video_f.as_posix())
+        # audio = dataset[sample_index]['ori_audio']
+        # sf.write(tmp_audio_f.as_posix(), audio, dataset[sample_index]['ori_sr'])
+        # p = Popen(
+        #     shlex.split(f'ffmpeg -y -i {tmp_video_f.as_posix()} -i {tmp_audio_f.as_posix()} -map 0 -map 1:a -c:v copy -shortest {final_video_f.as_posix()}'),
+        #     stdout=DEVNULL,
+        #     stderr=DEVNULL
+        # )
+        # p.wait()
+        # tmp_video_f.unlink()
+        # tmp_audio_f.unlink()
 
 
 if __name__ == '__main__':
@@ -62,7 +80,11 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError()
 
-    motion_prior = TransformerPrior(args, is_train=False)
-    motion_prior.resume(args.resume_prior)
-    motion_prior.net.eval()
-    inference(motion_prior, dataset, args)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        motion_prior = TransformerPrior(args, is_train=False)
+        for epoch in range(20, 21, 2):
+            motion_prior.resume(os.path.join(args.resume_prior, f'epoch{epoch}.pth'))
+            motion_prior.net.eval()
+            print(epoch)
+            inference(motion_prior, dataset, args)

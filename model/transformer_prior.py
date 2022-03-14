@@ -24,15 +24,15 @@ class TransformerPrior(Model):
         num_downsample_layers = sum([1 if x else 0 for x in args.encoder_downsample_layers])
         self.seed_code_len = args.prior_seed_len // 2**num_downsample_layers
         self.tgt_code_len = args.seq_len // 2**num_downsample_layers
-        d_k = args.pose_hidden_size // args.prior_n_head
-        d_v = args.pose_hidden_size // args.prior_n_head
+        d_k = args.prior_d_model // args.prior_n_head
+        d_v = args.prior_d_model // args.prior_n_head
         self.net = nn.ModuleDict({
-            'seed_embed': nn.Linear(args.num_embedding*args.num_vq_head, args.pose_hidden_size, bias=False),
+            'seed_embed': nn.Linear(args.num_embedding*args.num_vq_head, args.prior_d_model, bias=False),
             'gen': Generator(
-                args.pose_hidden_size,
+                args.prior_d_model,
                 args.audio_latent_dim,
                 args.prior_d_word,
-                args.pose_hidden_size,
+                args.prior_d_model,
                 args.num_prior_dec_layer,
                 args.prior_downsample_layer,
                 args.prior_n_head,
@@ -42,7 +42,7 @@ class TransformerPrior(Model):
                 self.seed_code_len,
                 self.tgt_code_len
                 ),
-            'output': nn.Linear(args.pose_hidden_size, args.num_embedding*args.num_vq_head),
+            'output': nn.Linear(args.prior_d_model, args.num_embedding*args.num_vq_head),
             'spec_enc': MelSpecEnc(args)
         }).to(self.device)
 
