@@ -10,7 +10,7 @@ from scipy import signal
 
 from dataset import BaijiaDataset
 from pose_embed.evaluator import EmbeddingSpaceEvaluator
-from model.transformer_prior import TransformerPrior
+from model.transformer_generator import TransformerGenerator
 from options import get_parser
 
 
@@ -21,7 +21,7 @@ def evaluate(prior_model, dataloader, dataset, args):
     mvd = []
 
     for data in tqdm(dataloader, 'Evaluating'):
-        spec = data['norm_spec'][:, prior_model.seed_code_len:]
+        spec = data['norm_spec'][:, args.prior_seed_len:]
         seed_motion = data['keypoints'][:, :args.prior_seed_len]
         word_embed = data['word_embed'][:, args.prior_seed_len:]
         silence = data['silence'][:, args.prior_seed_len:]
@@ -57,6 +57,7 @@ def evaluate(prior_model, dataloader, dataset, args):
 
         cur_maej = np.linalg.norm(ori_m[:, args.prior_seed_len:] - gen_m[:, args.prior_seed_len:], axis=3)
         maej.append(cur_maej)
+        mad.append(cur_mad)
 
     maej = np.concatenate(maej, axis=0)
     mad = np.concatenate(mad, axis=0)
@@ -81,11 +82,11 @@ if __name__ == '__main__':
         raise NotImplementedError()
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
-    motion_prior = TransformerPrior(args, is_train=False)
+    motion_prior = TransformerGenerator(args, is_train=False)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         result_dict = {}
-        for epoch in range(100, 210, 10):
+        for epoch in range(200, 210, 10):
             print(f'Epoch {epoch}')
             motion_prior.resume(os.path.join(args.resume_prior, f'epoch{epoch}.pth'))
             cur_res = evaluate(motion_prior, dataloader, dataset, args)

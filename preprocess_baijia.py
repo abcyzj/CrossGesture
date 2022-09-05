@@ -75,31 +75,31 @@ if __name__ == '__main__':
         with tgt_db_dnv.begin(write=True) as tgt_txn:
             for key, src_val in src_txn.cursor():
                 src_val = pickle.loads(src_val)
-                # keypoints_3d = src_val['keypoints_3d']
-                # upper_keypoints = keypoints_3d[:, valid_joint_ids]
-                # tgt_val = src_val
-                # tgt_val.pop('keypoints')
-                # tgt_val['keypoints_3d'] = upper_keypoints
-                # sr = src_val['audio_sr']
-                # waveform = src_val['audio_wav']
-                # audio_start_frame, audio_end_frame = src_val['audio_timestamp']
-                # keypoint_start_frame, keypoint_end_frame = src_val['keypoint_timestamp']
-                # sample_per_frame = sr // 25
-                # waveform = waveform[(keypoint_start_frame-audio_start_frame)*sample_per_frame:(keypoint_end_frame-audio_start_frame)*sample_per_frame].copy()
-                # tgt_val['audio_wav'] = waveform
-                # tgt_val.pop('audio_timestamp')
-                # norm_wave = torch.from_numpy(waveform.copy()).transpose(0, 1).to(torch.float32)
-                # if sr != 16000:
-                #     norm_wave = ta.transforms.Resample(sr, 16000)(norm_wave)
-                # if norm_wave.shape[0] > 1:
-                #     norm_wave = torch.mean(norm_wave, dim=0)
-                # spec = librosa.feature.melspectrogram(y=norm_wave.numpy(), sr=16000, n_fft=2048, win_length=800, hop_length=160, n_mels=80)
-                # spec_db = librosa.power_to_db(spec)
-                # tgt_val['spec'] = spec
-                # tgt_txn.put(key, pickle.dumps(tgt_val))
-                tgt_val = src_val.copy()
-                regulated_embedding, silence_frame_ind = get_word_embedding(src_val, bert_model)
-                tgt_val['word_embedding'] = regulated_embedding
-                tgt_val['silence'] = silence_frame_ind
+                keypoints_3d = src_val['keypoints_3d']
+                upper_keypoints = keypoints_3d[:, valid_joint_ids]
+                tgt_val = src_val
+                tgt_val.pop('keypoints')
+                tgt_val['keypoints_3d'] = upper_keypoints
+                sr = src_val['audio_sr']
+                waveform = src_val['audio_wav']
+                audio_start_frame, audio_end_frame = src_val['audio_timestamp']
+                keypoint_start_frame, keypoint_end_frame = src_val['keypoint_timestamp']
+                sample_per_frame = sr // 25
+                waveform = waveform[(keypoint_start_frame-audio_start_frame)*sample_per_frame:(keypoint_end_frame-audio_start_frame)*sample_per_frame].copy()
+                tgt_val['audio_wav'] = waveform
+                tgt_val.pop('audio_timestamp')
+                norm_wave = torch.from_numpy(waveform.copy()).transpose(0, 1).to(torch.float32)
+                if sr != 16000:
+                    norm_wave = ta.transforms.Resample(sr, 16000)(norm_wave)
+                if norm_wave.shape[0] > 1:
+                    norm_wave = torch.mean(norm_wave, dim=0)
+                spec = librosa.feature.melspectrogram(y=norm_wave.numpy(), sr=16000, n_fft=2048, win_length=800, hop_length=160, n_mels=80)
+                spec_db = librosa.power_to_db(spec)
+                tgt_val['spec'] = spec
                 tgt_txn.put(key, pickle.dumps(tgt_val))
-                print(key.decode())
+                # tgt_val = src_val.copy()
+                # regulated_embedding, silence_frame_ind = get_word_embedding(src_val, bert_model)
+                # tgt_val['word_embedding'] = regulated_embedding
+                # tgt_val['silence'] = silence_frame_ind
+                # tgt_txn.put(key, pickle.dumps(tgt_val))
+                # print(key.decode())
