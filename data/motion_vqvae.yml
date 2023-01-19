@@ -1,0 +1,30 @@
+name: motion_vae
+dataset: Baijia
+joint_num: 10
+joint_repr: dir_vec
+pose_hidden_size: 128
+seq_len: 128
+seq_stride: 10
+batch_size: 32
+epochs: 200
+lr: 0.0001
+momentum: 0.0
+lambda_pose: 1.0
+device: cuda
+optim: Adam
+num_workers: 16
+encoder_channels: [32, 32, 64, 128, 128]
+encoder_downsample_layers: [1, 0, 1, 0, 1]
+decoder_channels: [128, 64, 64, 32, 32]
+decoder_upsample_layers: [1, 0, 1, 0, 1]
+norm_type: instance
+vae_type: vqvae
+lambda_commit: 0.25
+lambda_ema_decay: 0.99
+num_embedding: 256
+num_vq_head: 2
+enc_dilations: [1, 2, 4, 8, 16]
+dec_dilations: [1, 2, 4, 8, 16]
+num_prior_dec_layer: 7
+prior_downsample_layer: [0, 1, 0, 1, 0, 1, 0]
+prior_d_model: 128
