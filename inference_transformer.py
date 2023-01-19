@@ -42,6 +42,7 @@ def inference(prior_model, dataset, args):
         gen_m = dataset.normalized_dir_vec_to_keypoints(gen_m)
         gen_m = dataset.camera_to_world(gen_m)
 
+    # Calculate SMS
     #     ori_v = np.gradient(ori_m[args.prior_seed_len:], axis=0)
     #     ori_v_max_ind = np.argmax(np.linalg.norm(ori_v, axis=2), axis=0)
     #     gen_v = np.gradient(gen_m[args.prior_seed_len:], axis=0)
