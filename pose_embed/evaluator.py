@@ -10,10 +10,10 @@ class EmbeddingSpaceEvaluator:
     def __init__(self, embed_net_path, device):
         # init embed net
         ckpt = torch.load(embed_net_path, map_location=device)
-        self.pose_dim = 30
-        self.n_frames = 64
+        self.pose_dim = 27
+        self.n_frames = 34
         self.net = EmbeddingNet(self.pose_dim, self.n_frames).to(device)
-        self.net.load_state_dict(ckpt['model_state_dict'])
+        self.net.load_state_dict(ckpt['gen_dict'])
         self.net.eval()
 
         # storage

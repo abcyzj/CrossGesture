@@ -99,12 +99,34 @@ class BaijiaMotionProcessor(MotionProcessor):
         return motion
 
 
+class TEDMotionProcessor(MotionProcessor):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def encode_motion(self, motion: torch.Tensor) -> torch.Tensor:
+        if len(motion.shape) == 4:
+            assert motion.shape[2] == 9
+            B, T = motion.shape[:2]
+            motion = motion.reshape(B, T, -1)
+        return motion
+
+    def decode_motion(self, motion: torch.Tensor) -> torch.Tensor:
+        assert (
+            len(motion.shape) == 3
+        ), f'Expects an array of size BxTxC, but received {motion.shape}'
+        B, T = motion.shape[:2]
+        motion = motion.reshape(B, T, 9, 3)
+        return motion
+
+
 class MotionVAE(Model):
     def __init__(self, args, is_train):
         super().__init__(args, is_train)
 
         if args.dataset == 'Baijia':
             self.motion_processor = BaijiaMotionProcessor()
+        elif args.dataset == 'TED':
+            self.motion_processor = TEDMotionProcessor()
         else:
             raise NotImplementedError()
 
@@ -132,8 +154,8 @@ class MotionVAE(Model):
             self.net_G.eval()
         motions = motions.to(self.device)
         motions = self.motion_processor.encode_motion(motions)
-        z_motion, z_motion_one_hot = self.net_G['motion_enc'](motions)
-        return z_motion, z_motion_one_hot
+        z_motion, z_motion_indices, z_motion_one_hot = self.net_G['motion_enc'](motions)
+        return z_motion, z_motion_indices, z_motion_one_hot
 
     def decode_motion_one_hot(self, z_motion_one_hot: torch.Tensor):
         """
@@ -215,7 +237,10 @@ class MotionVAE(Model):
 
         while self.epoch < self.args.epochs:
             for batch, data in enumerate(tqdm(dataloader, f'Epoch {self.epoch}')):
-                motion = data['keypoints'].float().to(self.device)
+                if self.args.dataset == 'Baijia':
+                    motion = data['keypoints'].float().to(self.device)
+                elif self.args.dataset == 'TED':
+                    motion = data[4].to(self.device)
 
                 self.optimG.zero_grad()
 

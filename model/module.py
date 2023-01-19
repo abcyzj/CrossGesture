@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .layer import CausalConvolution, ConvNet
+from .layer import CausalConvolution, ConvNet, TemporalConvNet
 
 
 class VanillaVAE(nn.Module):
@@ -90,9 +90,10 @@ class VectorQuantizerEMA(nn.Module):
 
         B, T, *_ = input_shape
         quantized = quantized.reshape(B, T, self._num_head, self._embedding_dim)
-        encoding_indices = encodings.reshape(B, T, self._num_head, self._num_embeddings)
+        encoding_one_hot = encodings.reshape(B, T, self._num_head, self._num_embeddings)
+        encoding_indices = encoding_indices.reshape(B, T, self._num_head)
 
-        return loss, quantized, perplexity, encoding_indices
+        return loss, quantized, perplexity, encoding_indices, encoding_one_hot
 
     def lookup_codebook(self, z_motion_one_hot: torch.Tensor):
         """
@@ -155,10 +156,10 @@ class MotionEnc(nn.Module):
             return z_specific
         elif self.args.vae_type == 'vqvae':
             spec_output = self.spec_mlp(output)
-            commit_loss, quantized, perplexity, encoding_indices = self.vae(spec_output)
+            commit_loss, quantized, perplexity, encoding_indices, encoding_one_hot = self.vae(spec_output)
             self.commit_loss = commit_loss
             self.perplexity = perplexity.detach() # Only for tensorboard display, do not backward gradient
-            return quantized, encoding_indices
+            return quantized, encoding_indices, encoding_one_hot
         else:
             raise NotImplementedError()
 
@@ -372,3 +373,36 @@ class PriorDec(nn.Module):
         logits = self.logits(x)
         logits = logits.reshape(B, self.num_head, self.num_embedding, T + 1)
         return logits
+
+
+class TextEncoderTCN(nn.Module):
+    """ based on https://github.com/locuslab/TCN/blob/master/TCN/word_cnn/model.py """
+    def __init__(self, args, n_words, embed_size=300, pre_trained_embedding=None,
+                 kernel_size=2, dropout=0.3, emb_dropout=0.1):
+        super(TextEncoderTCN, self).__init__()
+
+        if pre_trained_embedding is not None:  # use pre-trained embedding (fasttext)
+            assert pre_trained_embedding.shape[0] == n_words
+            assert pre_trained_embedding.shape[1] == embed_size
+            self.embedding = nn.Embedding.from_pretrained(torch.FloatTensor(pre_trained_embedding),
+                                                          freeze=args['freeze_wordembed'])
+        else:
+            self.embedding = nn.Embedding(n_words, embed_size)
+
+        num_channels = [args['hidden_size']] * args['n_layers']
+        self.tcn = TemporalConvNet(embed_size, num_channels, kernel_size, dropout=dropout)
+
+        self.decoder = nn.Linear(num_channels[-1], 32)
+        self.drop = nn.Dropout(emb_dropout)
+        self.emb_dropout = emb_dropout
+        self.init_weights()
+
+    def init_weights(self):
+        self.decoder.bias.data.fill_(0)
+        self.decoder.weight.data.normal_(0, 0.01)
+
+    def forward(self, input):
+        emb = self.drop(self.embedding(input))
+        y = self.tcn(emb.transpose(1, 2)).transpose(1, 2)
+        y = self.decoder(y)
+        return y.contiguous()

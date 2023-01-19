@@ -131,7 +131,10 @@ class Decoder(nn.Module):
             mel_input, _ = layer(mel_input, self_attn_mask=self_attn_mask)
         mel_input = self.mel_layer_norm(mel_input)
 
-        word_embed = self.word_embed_layer(word_embedding) + self.silence_embed(silence)
+        if silence is None:
+            word_embed = self.word_embed_layer(word_embedding)
+        else:
+            word_embed = self.word_embed_layer(word_embedding) + self.silence_embed(silence)
         word_input = self.word_dropout(self.word_pos_enc(word_embed))
         for layer in self.word_layers:
             word_input, _ = layer(word_input, self_attn_mask=self_attn_mask)

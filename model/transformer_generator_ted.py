@@ -1,18 +1,42 @@
 import logging
 import os
 
+import librosa
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio as ta
 from tqdm import tqdm
 from transformer.models import Generator
+from utils.vocab_utils import build_vocab
 
-from model.module import MelSpecEnc
+from model.module import MelSpecEnc, TextEncoderTCN
 
 from .model import Model
 
 
-class TransformerGenerator(Model):
+def spec_chunking(spec: torch.Tensor, frame_rate: int = 30, chunk_size: int = 101, stride: int = 1):
+    """
+    :param spec: (B, n_mel, n_frame) ndarray containing normalized mel-spectrogram
+    :return (B, num_chunks, n_mel, chunk_size)
+    """
+    melframe_per_frame = 16000 / 160 / frame_rate
+    padding = chunk_size // 2
+    spec = F.pad(spec, (padding, padding), 'constant', 0)
+    spec = spec.unsqueeze(1)
+    if chunk_size % 2 == 0:
+        # anchor_points = list(range(chunk_size//2, spec.shape[-1]-chunk_size//2 + 1, melframe_per_frame * stride))
+        anchor_points = np.arange(chunk_size//2, spec.shape[-1]-chunk_size//2 + 1, melframe_per_frame * stride)
+        spec = torch.cat([spec[:, :, :, int(i-chunk_size//2):int(i+chunk_size//2)] for i in anchor_points], dim=1)
+    else:
+        # anchor_points = list(range(chunk_size//2, spec.shape[-1]-chunk_size//2, melframe_per_frame * stride))
+        anchor_points = np.arange(chunk_size//2, spec.shape[-1]-chunk_size//2, melframe_per_frame * stride)
+        spec = torch.cat([spec[:, :, :, int(i-chunk_size//2):int(i+chunk_size//2+1)] for i in anchor_points], dim=1)
+    return spec
+
+
+class TransformerGeneratorTED(Model):
     def __init__(self, args, is_train):
         super().__init__(args, is_train)
 
@@ -20,8 +44,12 @@ class TransformerGenerator(Model):
 
         d_k = args.prior_d_model // args.prior_n_head
         d_v = args.prior_d_model // args.prior_n_head
+        self.num_downsample_layer = sum([1 if x else 0 for x in args.encoder_downsample_layers])
+        self.mel = ta.transforms.MelSpectrogram(16000, n_fft=2048, win_length=800, hop_length=160, n_mels=80).to(self.device)
+        lang_model = build_vocab('words', [], '/home/yezj/Gesture-Generation-from-Trimodal-Context/data/ted_dataset/vocab_cache.pkl', '/home/yezj/Gesture-Generation-from-Trimodal-Context/data/fasttext/crawl-300d-2M-subword.bin', 300)
         self.net = nn.ModuleDict({
             'seed_embed': nn.Linear(args.joint_num*3, args.prior_d_model),
+            'text_enc': TextEncoderTCN({'freeze_wordembed': True, 'hidden_size': 300, 'n_layers': 4}, lang_model.n_words, 300, lang_model.word_embedding_weights),
             'gen': Generator(
                 args.prior_d_model,
                 args.audio_latent_dim,
@@ -54,15 +82,18 @@ class TransformerGenerator(Model):
         self.batch_counts_per_epoch = len(dataloader)
         while self.epoch < self.args.epochs:
             for batch, data in enumerate(tqdm(dataloader, f'Epoch {self.epoch}')):
-                motions = data['keypoints'].float().to(self.device)
-                norm_spec = data['norm_spec'].float().to(self.device)
-                word_embedding = data['word_embed'].float().to(self.device)
-                silence = data['silence'].float().to(self.device)
+                _, _, in_text_padded, _, target_vec, in_audio, _, _ = data
+                in_text = self.net['text_enc'](in_text_padded.to(self.device))
+                target_vec = target_vec.to(self.device)
+                in_spec = self.mel(in_audio.to(self.device))
+                in_spec = spec_chunking(in_spec, frame_rate=15, chunk_size=21, stride=2**self.num_downsample_layer)
+                if target_vec.shape[1] < in_spec.shape[1]:
+                    in_spec = in_spec[:, :target_vec.shape[1]].contiguous()
 
                 self.optim.zero_grad()
 
-                out_pose = self.train_one_batch(motions, norm_spec, word_embedding, silence)
-                loss = self.calculate_loss(motions[:, self.args.prior_seed_len:],out_pose, batch)
+                out_pose = self.train_one_batch(target_vec, in_spec, in_text)
+                loss = self.calculate_loss(target_vec[:, self.args.prior_seed_len:], out_pose, batch)
 
                 loss.backward()
                 self.optim.step()
@@ -73,13 +104,12 @@ class TransformerGenerator(Model):
             if self.epoch % self.args.save_freq == 0:
                 self.save(loss.item())
 
-    def train_one_batch(self, motions: torch.Tensor, norm_spec: torch.Tensor, word_embedding: torch.Tensor, silence: torch.Tensor):
+    def train_one_batch(self, motions: torch.Tensor, norm_spec: torch.Tensor, word_embedding: torch.Tensor):
         B, *_ = motions.shape
         audio_code = self.net['spec_enc'](norm_spec[:, self.args.prior_seed_len:])
         seed_code = self.net['seed_embed'](motions[:, :self.args.prior_seed_len].reshape(B, self.args.prior_seed_len, -1))
         word_embedding = word_embedding[:, self.args.prior_seed_len:]
-        silence = silence[:, self.args.prior_seed_len:]
-        prior_output = self.net['gen'](seed_code, audio_code, word_embedding, silence)
+        prior_output = self.net['gen'](seed_code, audio_code, word_embedding, None)
         out_pose = self.net['output'](prior_output).reshape(B, self.args.seq_len, self.args.joint_num, -1)
 
         return out_pose
